@@ -32,14 +32,6 @@ IF temperature > 74°F → Turn ON the AC
 
 The system only checks the current temperature and reacts immediately.
 
-Architecture of a Simple Reflex Agent
-[Input / Perception]
-        ↓
-[Condition Checker]
- (IF–THEN Rules)
-        ↓
-[Action]
-
 Explanation:
 
 Input / Perception – The agent receives information from the environment.
