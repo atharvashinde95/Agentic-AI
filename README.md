@@ -1,1 +1,64 @@
 # Agentic-AI
+Types of Agents : 
+Simple Reflex Agents
+What is a Simple Reflex Agent?
+
+A Simple Reflex Agent is the most basic type of AI agent. It makes decisions using a simple rule:
+
+IF this condition → THEN perform this action
+
+The agent:
+
+Does not store memory
+
+Does not plan
+
+Does not consider past experiences
+
+It simply follows the process:
+
+Perceive input → Match a rule → Take action
+
+Example
+
+A common example is a thermostat that controls temperature.
+
+Rules:
+
+IF temperature < 68°F → Turn ON the heater
+
+IF temperature > 74°F → Turn ON the AC
+
+The system only checks the current temperature and reacts immediately.
+
+Architecture of a Simple Reflex Agent
+[Input / Perception]
+        ↓
+[Condition Checker]
+ (IF–THEN Rules)
+        ↓
+[Action]
+
+Explanation:
+
+Input / Perception – The agent receives information from the environment.
+
+Condition Checker – The agent checks predefined IF–THEN rules.
+
+Action – It performs the action that matches the rule.
+
+Key Characteristics
+
+Simple and fast
+
+Deterministic decision-making
+
+Uses predefined rules
+
+However, it has limitations:
+
+Cannot learn from experience
+
+Cannot remember past events
+
+Cannot handle situations that do not match existing rules
