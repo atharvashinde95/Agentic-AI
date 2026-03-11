@@ -69,14 +69,6 @@ No memory. No planning. Just IF → THEN rules.
 """
 
 import re
-
-# ─────────────────────────────────────────────
-#  RULES — each rule is a dict with:
-#    - condition : a function that takes user input (str) → bool
-#    - tag       : label shown when rule fires
-#    - response  : what the agent says
-# ─────────────────────────────────────────────
-
 RULES = [
     {
         "tag": "GREET",
