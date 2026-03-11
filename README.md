@@ -7,7 +7,6 @@ What is a Simple Reflex Agent?
 A Simple Reflex Agent is the most basic type of AI agent. It makes decisions using a simple rule:
 
 IF this condition → THEN perform this action
-
 The agent:
 
 Does not store memory
