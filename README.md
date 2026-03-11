@@ -1,5 +1,5 @@
 # Agentic-AI
-Types of Agents : 
+## Types of Agents : 
 
 Simple Reflex Agents
 What is a Simple Reflex Agent?
