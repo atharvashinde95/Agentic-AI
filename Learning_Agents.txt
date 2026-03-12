@@ -1,0 +1,84 @@
+Learning Agents
+What is a Learning Agent?
+
+A Learning Agent is an AI system that can improve its performance over time by learning from experience.
+
+Unlike previous agents that rely on fixed rules or predefined logic, a Learning Agent adapts its behavior based on feedback from the environment. 📈
+
+This means the agent becomes better with every interaction.
+
+Simple idea:
+
+Act → Get Feedback → Update Behavior → Perform Better Next Time
+
+How It Works
+
+A Learning Agent continuously improves through a feedback loop:
+
+[Act] → [Get Feedback] → [Update Weights / Knowledge] → [Act Better Next Time]
+           ↑                       ↑
+      "Was that good?"     "Adjust what matters"
+
+Steps involved:
+
+The agent takes an action.
+
+It receives feedback about the result.
+
+It analyzes whether the action was good or bad.
+
+It updates its internal parameters or strategy.
+
+Future actions become more accurate and effective.
+
+Architecture of a Learning Agent
+
+A Learning Agent typically contains four main components:
+
+┌─────────────────────────────────────────┐
+│  LEARNING ELEMENT    ← updates knowledge│
+│  PERFORMANCE ELEMENT ← makes decisions  │
+│  CRITIC              ← evaluates results│
+│  PROBLEM GENERATOR   ← explores options │
+└─────────────────────────────────────────┘
+Components Explained
+
+1. Performance Element
+This part chooses actions based on the current knowledge of the agent.
+
+2. Learning Element
+It improves the agent’s knowledge or strategy using feedback.
+
+3. Critic
+The critic judges the outcome of the agent’s actions and provides feedback.
+
+4. Problem Generator
+This component encourages the agent to try new actions or explore new possibilities to improve learning.
+
+Example
+
+Music Recommendation System
+
+At first, the system may recommend songs randomly.
+
+But over time it learns from user behavior such as:
+
+songs played
+
+songs skipped
+
+songs liked
+
+Using this feedback, the system gradually improves its recommendations.
+
+Why Learning Agents Are Powerful
+
+Learning Agents are important because they:
+
+Adapt to new environments
+
+Improve automatically with experience
+
+Handle complex and dynamic problems
+
+Reduce the need for manual rule programming
