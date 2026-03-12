@@ -1,0 +1,622 @@
+Hierarchical Agent System
+What is a Hierarchical Agent System?
+
+A Hierarchical Agent System is a type of multi-agent architecture where agents are organized in levels of authority and responsibility, similar to a real-world organization. 🏢🤖
+
+In a normal Multi-Agent System (MAS), agents usually work as peers in a flat pipeline.
+In a Hierarchical Agent System, agents are structured in layers of command, where higher-level agents manage and guide lower-level agents.
+
+In simple terms:
+
+Top-Level Agents → Plan and assign tasks → Lower-Level Agents execute them
+
+Structure of a Hierarchical Agent System
+            [CEO Agent]            ← Level 1: Strategic
+           /      |       \
+      [VP-1]   [VP-2]   [VP-3]     ← Level 2: Tactical
+       /   \      |      /    \
+    [A1]  [A2]  [A3]  [A4]  [A5]   ← Level 3: Operational
+Responsibilities at Each Level
+
+1. Top Level (Strategic Level)
+
+Defines the overall goal
+
+Breaks the goal into strategies
+
+Assigns tasks to middle-level agents
+
+Example: CEO agent deciding the main objective.
+
+2. Middle Level (Tactical Level)
+
+Converts strategies into execution plans
+
+Assigns specific tasks to worker agents
+
+Monitors progress
+
+Example: VP agents managing departments.
+
+3. Bottom Level (Operational Level)
+
+Performs the actual work
+
+Executes tasks such as:
+
+searching information
+
+writing content
+
+performing calculations
+
+Example: Worker agents completing assigned tasks.
+
+Hierarchical Agents vs Multi-Agent Systems
+Feature	Multi-Agent System (MAS)	Hierarchical Agent System
+Structure	Flat pipeline	Layered tree structure
+Control	Peer-to-peer	Top-down command
+Task Delegation	Fixed routing	Dynamic assignment
+Oversight	No clear supervision	Each level supervises the next
+Real-World Analogy
+
+Multi-Agent System:
+Like an assembly line, where each worker performs a fixed step.
+
+Hierarchical Agent System:
+Like a company organizational chart, where managers coordinate teams and assign tasks.
+
+Why Hierarchical Agents Are Useful
+
+Hierarchical systems help manage very complex tasks because they:
+
+organize agents into clear roles
+
+allow efficient task delegation
+
+provide better supervision and coordination
+
+scale easily for large systems 
+
+
+"""
+Hierarchical Agent System — Business Intelligence
+==================================================
+3-Level Architecture:
+
+  Level 1 — CEO Agent       (Strategic)
+    Sets the overall goal, decomposes into domains,
+    synthesizes final report from VP summaries.
+
+  Level 2 — VP Agents       (Tactical)
+    Each owns one domain (Market, Finance, Risk).
+    Breaks domain into sub-tasks, assigns to Workers,
+    synthesizes Worker results into a domain brief.
+
+  Level 3 — Worker Agents   (Operational)
+    Each handles one atomic task (one search/analysis).
+    Reports raw findings directly up to their VP.
+
+Key Properties:
+  - Commands flow DOWN  (CEO → VP → Worker)
+  - Results  flow UP    (Worker → VP → CEO)
+  - Each level SYNTHESIZES before passing up
+  - No level skipping (Workers never talk to CEO)
+
+Run:
+  pip install anthropic
+  export ANTHROPIC_API_KEY=your_key
+  python hierarchical_agents.py
+"""
+
+import json
+import anthropic
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+
+# ─────────────────────────────────────────────────────
+# 1. COMMAND & RESULT STRUCTURES
+# ─────────────────────────────────────────────────────
+@dataclass
+class Command:
+    """Flows DOWN the hierarchy."""
+    from_agent:  str
+    to_agent:    str
+    task_id:     str
+    instruction: str
+    context:     dict = field(default_factory=dict)
+
+@dataclass
+class Result:
+    """Flows UP the hierarchy."""
+    from_agent:  str
+    to_agent:    str
+    task_id:     str
+    findings:    str
+    confidence:  float = 0.8
+    metadata:    dict  = field(default_factory=dict)
+
+
+# ─────────────────────────────────────────────────────
+# 2. HIERARCHY LOGGER  (visualizes the tree)
+# ─────────────────────────────────────────────────────
+class HierarchyLogger:
+    def __init__(self):
+        self.events = []
+
+    def log(self, level: int, agent: str, action: str, detail: str = ""):
+        indent = "  " * level
+        icon   = ["🏢", "📋", "⚙️ "][min(level, 2)]
+        ts     = datetime.now().strftime("%H:%M:%S")
+        line   = f"{indent}{icon} [{ts}] {agent}: {action}"
+        if detail:
+            line += f"\n{indent}   → {detail[:90]}"
+        print(line)
+        self.events.append({"level": level, "agent": agent,
+                             "action": action, "time": ts})
+
+    def command(self, frm: str, to: str, instruction: str):
+        print(f"  {'─'*50}")
+        print(f"  ⬇️  COMMAND  {frm} → {to}")
+        print(f"     \"{instruction[:70]}\"")
+
+    def result(self, frm: str, to: str, summary: str):
+        print(f"  ⬆️  RESULT   {frm} → {to}")
+        print(f"     \"{summary[:70]}\"")
+        print(f"  {'─'*50}")
+
+
+# ─────────────────────────────────────────────────────
+# 3. BASE AGENT
+# ─────────────────────────────────────────────────────
+class Agent:
+    def __init__(self, name: str, level: int, system_prompt: str,
+                 client: anthropic.Anthropic, logger: HierarchyLogger):
+        self.name    = name
+        self.level   = level          # 0=CEO, 1=VP, 2=Worker
+        self.system  = system_prompt
+        self.client  = client
+        self.logger  = logger
+        self.history: list[dict] = []
+
+    def think(self, prompt: str, max_tokens: int = 1200) -> str:
+        self.history.append({"role": "user", "content": prompt})
+        resp = self.client.messages.create(
+            model      = "claude-sonnet-4-20250514",
+            max_tokens = max_tokens,
+            system     = self.system,
+            messages   = self.history,
+        )
+        reply = resp.content[0].text
+        self.history.append({"role": "assistant", "content": reply})
+        return reply
+
+    def think_json(self, prompt: str, max_tokens: int = 1200) -> dict:
+        raw = self.think(prompt, max_tokens)
+        # Strip any accidental markdown fences
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = "\n".join(clean.split("\n")[1:])
+        if clean.endswith("```"):
+            clean = "\n".join(clean.split("\n")[:-1])
+        return json.loads(clean.strip())
+
+
+# ─────────────────────────────────────────────────────
+# 4. LEVEL 3 — WORKER AGENTS  (operational)
+# ─────────────────────────────────────────────────────
+WORKER_SYSTEM = """You are a specialist research worker. You handle ONE specific task.
+Research thoroughly and report factual findings. Be specific with numbers and examples.
+Respond ONLY with valid JSON, no markdown fences."""
+
+class WorkerAgent(Agent):
+    def __init__(self, name: str, specialty: str,
+                 client: anthropic.Anthropic, logger: HierarchyLogger):
+        super().__init__(name, level=2,
+                         system_prompt=WORKER_SYSTEM,
+                         client=client, logger=logger)
+        self.specialty = specialty
+
+    def execute(self, command: Command) -> Result:
+        self.logger.log(2, self.name, f"executing task: {command.task_id}")
+
+        raw = self.think_json(f"""
+Execute this research task:
+
+Task:    {command.instruction}
+Context: {json.dumps(command.context)}
+
+Respond ONLY with this JSON:
+{{
+  "task_id":    "{command.task_id}",
+  "findings":   "detailed findings in 3-5 sentences with specifics",
+  "key_points": ["point 1", "point 2", "point 3"],
+  "confidence": 0.0,
+  "data_points": ["specific number or fact 1", "specific number or fact 2"]
+}}
+confidence: 0.0-1.0 based on how well you could answer this.
+""")
+
+        self.logger.log(2, self.name,
+                        f"completed  [{raw['confidence']:.0%} confidence]",
+                        raw["findings"][:80])
+
+        return Result(
+            from_agent = self.name,
+            to_agent   = command.from_agent,
+            task_id    = command.task_id,
+            findings   = raw["findings"],
+            confidence = raw["confidence"],
+            metadata   = {
+                "key_points":  raw["key_points"],
+                "data_points": raw["data_points"],
+            }
+        )
+
+
+# ─────────────────────────────────────────────────────
+# 5. LEVEL 2 — VP AGENTS  (tactical)
+# ─────────────────────────────────────────────────────
+VP_SYSTEM = """You are a VP-level manager agent. You:
+1. Receive a domain task from your CEO
+2. Break it into 2-3 atomic sub-tasks for your workers
+3. Synthesize worker results into a concise domain brief for the CEO
+Be tactical and precise. Respond ONLY with valid JSON, no markdown fences."""
+
+class VPAgent(Agent):
+    def __init__(self, name: str, domain: str, workers: list[WorkerAgent],
+                 client: anthropic.Anthropic, logger: HierarchyLogger):
+        super().__init__(name, level=1,
+                         system_prompt=VP_SYSTEM,
+                         client=client, logger=logger)
+        self.domain  = domain
+        self.workers = workers    # pool of workers this VP manages
+
+    def _plan_subtasks(self, command: Command) -> list[dict]:
+        """Break the VP's task into worker-sized sub-tasks."""
+        n = len(self.workers)
+        raw = self.think_json(f"""
+You manage the {self.domain} domain.
+CEO instruction: {command.instruction}
+You have {n} workers available: {[w.name for w in self.workers]}
+
+Break this into exactly {n} atomic sub-tasks, one per worker.
+Respond ONLY with this JSON:
+{{
+  "domain": "{self.domain}",
+  "sub_tasks": [
+    {{"worker": "{self.workers[0].name}", "task_id": "t1",
+      "instruction": "specific instruction for worker 1"}},
+    {{"worker": "{self.workers[1].name}", "task_id": "t2",
+      "instruction": "specific instruction for worker 2"}}
+  ]
+}}
+""")
+        return raw["sub_tasks"]
+
+    def _synthesize(self, results: list[Result], original_task: str) -> str:
+        """Synthesize worker results into a domain brief for CEO."""
+        findings_text = "\n".join(
+            f"[{r.from_agent}] {r.findings}" for r in results
+        )
+        raw = self.think_json(f"""
+Synthesize these worker findings into a domain brief for the CEO.
+
+Original task: {original_task}
+Domain: {self.domain}
+
+Worker findings:
+{findings_text}
+
+Respond ONLY with this JSON:
+{{
+  "domain_brief": "3-4 sentence synthesis of all findings for CEO",
+  "top_insights": ["insight 1", "insight 2", "insight 3"],
+  "domain_confidence": 0.0,
+  "recommendation": "one specific recommendation for the CEO"
+}}
+""")
+        return raw
+
+    def execute(self, command: Command) -> Result:
+        self.logger.log(1, self.name,
+                        f"received domain task: {self.domain}",
+                        command.instruction[:70])
+
+        # Step 1: Plan sub-tasks
+        self.logger.log(1, self.name, f"planning sub-tasks for {len(self.workers)} workers")
+        sub_tasks = self._plan_subtasks(command)
+
+        # Step 2: Dispatch to workers (send commands DOWN)
+        worker_map = {w.name: w for w in self.workers}
+        results: list[Result] = []
+
+        for st in sub_tasks:
+            worker = worker_map.get(st["worker"], self.workers[0])
+            worker_cmd = Command(
+                from_agent  = self.name,
+                to_agent    = worker.name,
+                task_id     = st["task_id"],
+                instruction = st["instruction"],
+                context     = {"domain": self.domain, "ceo_goal": command.context.get("goal", "")},
+            )
+            self.logger.command(self.name, worker.name, st["instruction"])
+            result = worker.execute(worker_cmd)
+            self.logger.result(worker.name, self.name, result.findings[:60])
+            results.append(result)
+
+        # Step 3: Synthesize results (aggregate UP)
+        self.logger.log(1, self.name,
+                        f"synthesizing {len(results)} worker results")
+        synthesis = self._synthesize(results, command.instruction)
+
+        brief = synthesis["domain_brief"]
+        self.logger.log(1, self.name,
+                        f"domain brief ready [{synthesis['domain_confidence']:.0%} confidence]",
+                        brief[:80])
+
+        return Result(
+            from_agent = self.name,
+            to_agent   = command.from_agent,
+            task_id    = command.task_id,
+            findings   = brief,
+            confidence = synthesis["domain_confidence"],
+            metadata   = {
+                "top_insights":    synthesis["top_insights"],
+                "recommendation":  synthesis["recommendation"],
+                "worker_results":  [r.findings for r in results],
+            }
+        )
+
+
+# ─────────────────────────────────────────────────────
+# 6. LEVEL 1 — CEO AGENT  (strategic)
+# ─────────────────────────────────────────────────────
+CEO_SYSTEM = """You are a CEO-level strategic agent. You:
+1. Receive a high-level business question
+2. Decompose it into domain-specific tasks for your VP agents
+3. Synthesize VP briefs into an executive strategic report
+Think strategically. Respond ONLY with valid JSON, no markdown fences."""
+
+class CEOAgent(Agent):
+    def __init__(self, vps: list[VPAgent],
+                 client: anthropic.Anthropic, logger: HierarchyLogger):
+        super().__init__("CEO", level=0,
+                         system_prompt=CEO_SYSTEM,
+                         client=client, logger=logger)
+        self.vps = vps
+
+    def _decompose_goal(self, goal: str) -> list[dict]:
+        """Break the strategic goal into VP-level domain tasks."""
+        vp_list = [{"name": vp.name, "domain": vp.domain} for vp in self.vps]
+        raw = self.think_json(f"""
+Strategic goal: {goal}
+Your VP agents: {json.dumps(vp_list)}
+
+Assign a focused domain task to each VP that contributes to the overall goal.
+Respond ONLY with this JSON:
+{{
+  "goal_summary": "one sentence restatement of the goal",
+  "report_title": "title for the final executive report",
+  "vp_tasks": [
+    {{"vp": "VP name", "domain": "domain",
+      "task_id": "vp_task_1",
+      "instruction": "specific instruction for this VP"}},
+    {{"vp": "VP name", "domain": "domain",
+      "task_id": "vp_task_2",
+      "instruction": "specific instruction for this VP"}},
+    {{"vp": "VP name", "domain": "domain",
+      "task_id": "vp_task_3",
+      "instruction": "specific instruction for this VP"}}
+  ]
+}}
+""")
+        return raw
+
+    def _compile_report(self, goal: str, title: str,
+                        vp_results: list[Result]) -> str:
+        """Synthesize all VP briefs into the final executive report."""
+        briefs = "\n\n".join(
+            f"[{r.from_agent} — {r.metadata.get('top_insights', [])}]\n{r.findings}"
+            for r in vp_results
+        )
+        recommendations = "\n".join(
+            f"• {r.from_agent}: {r.metadata.get('recommendation', '')}"
+            for r in vp_results
+        )
+
+        raw = self.think_json(f"""
+Compile a strategic executive report.
+
+Goal:    {goal}
+Title:   {title}
+
+VP Domain Briefs:
+{briefs}
+
+VP Recommendations:
+{recommendations}
+
+Respond ONLY with this JSON:
+{{
+  "executive_summary": "2-3 sentence high-level summary",
+  "sections": [
+    {{"heading": "VP domain heading", "content": "2-3 sentence synthesis",
+      "top_insight": "key insight", "risk_level": "Low/Medium/High"}}
+  ],
+  "strategic_recommendation": "1-2 sentence overall CEO recommendation",
+  "confidence": 0.0,
+  "next_steps": ["step 1", "step 2", "step 3"]
+}}
+Include one section per VP domain.
+""")
+        return raw
+
+    def run(self, goal: str) -> str:
+        self.logger.log(0, "CEO", f"received strategic goal", goal[:80])
+
+        # Step 1: Decompose goal into VP tasks (command DOWN)
+        self.logger.log(0, "CEO", "decomposing goal into domain tasks")
+        plan = self._decompose_goal(goal)
+
+        self.logger.log(0, "CEO",
+                        f"dispatching to {len(self.vps)} VPs",
+                        plan["goal_summary"])
+
+        # Step 2: Dispatch to VPs
+        vp_map   = {vp.name: vp for vp in self.vps}
+        vp_results: list[Result] = []
+
+        for vp_task in plan["vp_tasks"]:
+            vp = vp_map.get(vp_task["vp"], self.vps[0])
+            cmd = Command(
+                from_agent  = "CEO",
+                to_agent    = vp.name,
+                task_id     = vp_task["task_id"],
+                instruction = vp_task["instruction"],
+                context     = {"goal": goal, "report_title": plan["report_title"]},
+            )
+            print(f"\n{'═'*56}")
+            self.logger.command("CEO", vp.name, vp_task["instruction"])
+            result = vp.execute(cmd)
+            self.logger.result(vp.name, "CEO", result.findings[:60])
+            vp_results.append(result)
+
+        # Step 3: Synthesize into executive report (aggregate UP)
+        print(f"\n{'═'*56}")
+        self.logger.log(0, "CEO", "synthesizing VP briefs into executive report")
+        report_data = self._compile_report(goal, plan["report_title"], vp_results)
+
+        return self._format_report(plan["report_title"], goal, report_data, vp_results)
+
+    def _format_report(self, title: str, goal: str,
+                       data: dict, vp_results: list[Result]) -> str:
+        lines = [
+            "",
+            "╔" + "═" * 58 + "╗",
+            f"║  {title:<56}║",
+            f"║  Executive Report — Hierarchical Agent System{'':11}║",
+            f"║  {datetime.now().strftime('%Y-%m-%d %H:%M'):<56}║",
+            "╚" + "═" * 58 + "╝",
+            "",
+            "── EXECUTIVE SUMMARY " + "─" * 37,
+            data["executive_summary"],
+        ]
+
+        lines += ["", "── DOMAIN ANALYSIS " + "─" * 39]
+        for sec in data["sections"]:
+            risk_icon = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(
+                sec.get("risk_level", "Medium"), "🟡")
+            lines += [
+                f"\n{risk_icon} {sec['heading']}",
+                sec["content"],
+                f"   ↳ Key insight: {sec['top_insight']}",
+                f"   ↳ Risk level:  {sec.get('risk_level', 'Medium')}",
+            ]
+
+        lines += [
+            "",
+            "── VP RECOMMENDATIONS " + "─" * 36,
+        ]
+        for r in vp_results:
+            lines.append(f"  • {r.from_agent}: {r.metadata.get('recommendation', '')}")
+
+        lines += [
+            "",
+            "── STRATEGIC RECOMMENDATION " + "─" * 30,
+            data["strategic_recommendation"],
+            "",
+            "── NEXT STEPS " + "─" * 44,
+        ]
+        for i, step in enumerate(data.get("next_steps", []), 1):
+            lines.append(f"  {i}. {step}")
+
+        lines += [
+            "",
+            f"── SYSTEM STATS " + "─" * 42,
+            f"  Overall confidence : {data['confidence']:.0%}",
+            f"  Agents involved    : 1 CEO + {len(self.vps)} VPs + "
+            f"{sum(len(vp.workers) for vp in self.vps)} Workers = "
+            f"{1 + len(self.vps) + sum(len(vp.workers) for vp in self.vps)} total",
+            f"  Hierarchy levels   : 3  (CEO → VP → Worker)",
+            "═" * 60,
+        ]
+        return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────
+# 7. SYSTEM BUILDER
+# ─────────────────────────────────────────────────────
+def build_system(client: anthropic.Anthropic,
+                 logger: HierarchyLogger) -> CEOAgent:
+    """
+    Assemble the 3-level hierarchy:
+      CEO
+       ├── VP Market    [Worker: Market Size,   Worker: Competitors]
+       ├── VP Finance   [Worker: Margins,        Worker: Investment]
+       └── VP Risk      [Worker: Regulatory,     Worker: Technology]
+    """
+    # Level 3 — Workers
+    w_market_size  = WorkerAgent("Market-Size-Analyst",  "market sizing",     client, logger)
+    w_competitors  = WorkerAgent("Competitor-Analyst",   "competitive intel", client, logger)
+    w_margins      = WorkerAgent("Margins-Analyst",      "profit margins",    client, logger)
+    w_investment   = WorkerAgent("Investment-Analyst",   "capital costs",     client, logger)
+    w_regulatory   = WorkerAgent("Regulatory-Analyst",   "regulations",       client, logger)
+    w_technology   = WorkerAgent("Technology-Analyst",   "tech risk",         client, logger)
+
+    # Level 2 — VPs
+    vp_market  = VPAgent("VP-Market",  "Market Intelligence",
+                         [w_market_size, w_competitors], client, logger)
+    vp_finance = VPAgent("VP-Finance", "Financial Analysis",
+                         [w_margins, w_investment],      client, logger)
+    vp_risk    = VPAgent("VP-Risk",    "Risk Assessment",
+                         [w_regulatory, w_technology],   client, logger)
+
+    # Level 1 — CEO
+    ceo = CEOAgent([vp_market, vp_finance, vp_risk], client, logger)
+
+    return ceo
+
+
+# ─────────────────────────────────────────────────────
+# 8. MAIN
+# ─────────────────────────────────────────────────────
+def main():
+    print("╔══════════════════════════════════════════╗")
+    print("║  Hierarchical Agent System               ║")
+    print("║  3 Levels: CEO → VP → Worker             ║")
+    print("║  7 Agents total                          ║")
+    print("╚══════════════════════════════════════════╝")
+
+    goal = input("\nBusiness question (or Enter for default):\n> ").strip()
+    if not goal:
+        goal = "Should we expand our product line into electric vehicles?"
+
+    client  = anthropic.Anthropic()
+    logger  = HierarchyLogger()
+    ceo     = build_system(client, logger)
+
+    print(f"\n{'═'*56}")
+    print(f"  Hierarchy assembled:")
+    print(f"  CEO")
+    for vp in ceo.vps:
+        print(f"   ├── {vp.name} ({vp.domain})")
+        for w in vp.workers:
+            print(f"   │     └── {w.name}")
+    print(f"{'═'*56}")
+
+    report = ceo.run(goal)
+    print(report)
+
+    save = input("\nSave report? (y/n): ").strip().lower()
+    if save == "y":
+        fname = f"hierarchical_report_{datetime.now().strftime('%H%M%S')}.txt"
+        with open(fname, "w") as f:
+            f.write(report)
+        print(f"Saved to {fname}")
+
+
+if __name__ == "__main__":
+    main()
