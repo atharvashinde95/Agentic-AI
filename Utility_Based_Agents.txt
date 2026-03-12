@@ -1,0 +1,440 @@
+Utility-Based Agents
+What is a Utility-Based Agent?
+
+A Utility-Based Agent is an AI agent that chooses actions based on which option achieves the goal in the best possible way.
+
+While Goal-Based Agents only ask:
+
+“Does this action achieve my goal?” → Yes or No
+
+a Utility-Based Agent asks:
+
+“Which action achieves my goal the best?”
+
+To do this, the agent scores and ranks possible actions using something called a utility function.
+
+Simple process:
+
+Possible Actions → Score each action → Pick highest score → Act
+
+Example
+
+Imagine you want to book a flight.
+
+Goal-Based Thinking
+
+Goal: Reach Mumbai
+Any flight that goes to Mumbai is acceptable.
+
+Result:
+Flight A → Mumbai ✔
+Flight B → Mumbai ✔
+
+Both are acceptable.
+
+Utility-Based Thinking
+
+Instead of picking just any flight, you evaluate options using factors like:
+
+price
+
+travel time
+
+comfort
+
+Each flight is scored, and the one with the highest score is selected.
+
+Example scoring:
+
+Flight A → Cheap but long duration
+Flight B → Fast but expensive
+Flight C → Balanced price and time
+
+The agent chooses the best overall option, not just any option.
+
+Utility Function
+
+The utility function calculates how good an option is by assigning weights to different factors.
+
+Example:
+
+Utility Score =
+(price × 0.4) + (speed × 0.3) + (risk × 0.3)
+
+This means:
+
+price is most important (40%)
+
+speed and risk also influence the decision
+
+The option with the highest utility score is selected.
+
+Architecture of a Utility-Based Agent
+[State]
+   ↓
+[Generate Possible Actions]
+   ↓
+[Score Each Action]
+ (Utility Function)
+   price × 0.4
+   speed × 0.3
+   risk  × 0.3
+   ↓
+[Pick Highest Score]
+   ↓
+[Act]
+Why Utility-Based Agents Are Useful
+
+Utility-Based Agents are powerful because they:
+
+compare multiple options
+
+consider trade-offs between factors
+
+make optimal decisions
+
+They are commonly used in:
+
+recommendation systems
+
+route planning
+
+financial decision systems
+
+intelligent assistants 
+
+
+"""
+Utility-Based Agent — Smart Shopping Assistant
+===============================================
+Architecture: State → Generate Options → Score Each → Pick Best → Act
+
+KEY UPGRADE over Goal-Based:
+  - Doesn't just find ANY solution that works
+  - Scores ALL options across multiple criteria
+  - Picks the one with the HIGHEST utility score
+  - Can explain its reasoning
+
+Utility Formula:
+  U(option) = Σ (weight_i × normalized_score_i)
+
+Run:
+  python utility_based_agent.py
+"""
+
+from dataclasses import dataclass, field
+
+
+# ─────────────────────────────────────────────────────
+# 1. DATA MODELS
+# ─────────────────────────────────────────────────────
+@dataclass
+class Laptop:
+    name:         str
+    price:        float   # USD
+    ram_gb:       int
+    storage_gb:   int
+    battery_hrs:  float
+    weight_kg:    float
+    gpu:          bool
+    brand_score:  float   # 0–10 reliability rating
+    speed_score:  float   # 0–10 benchmark score
+
+    def __str__(self):
+        gpu_tag = "🎮 GPU" if self.gpu else "      "
+        return (f"{self.name:<28} ${self.price:>6.0f}  "
+                f"{self.ram_gb}GB RAM  {self.battery_hrs}h  "
+                f"{self.weight_kg}kg  {gpu_tag}")
+
+
+@dataclass
+class UserPreferences:
+    """What the user cares about and how much."""
+    budget:          float          # max price they'll pay
+    priorities:      dict           # criterion → weight (must sum to 1.0)
+    needs_gpu:       bool = False   # hard requirement
+    min_ram_gb:      int  = 8       # hard requirement
+    min_battery_hrs: float = 5.0   # hard requirement
+
+
+# ─────────────────────────────────────────────────────
+# 2. PRODUCT CATALOG  (the world the agent perceives)
+# ─────────────────────────────────────────────────────
+CATALOG = [
+    Laptop("Apple MacBook Air M3",       1299, 16,  512, 18.0, 1.24, False, 9.5, 8.8),
+    Laptop("Apple MacBook Pro M3 Pro",   1999, 18, 1024, 22.0, 1.55, True,  9.7, 9.6),
+    Laptop("Dell XPS 15",               1799, 16,  512, 12.0, 1.86, True,  8.8, 9.0),
+    Laptop("Lenovo ThinkPad X1 Carbon", 1499, 16,  512, 15.0, 1.12, False, 9.2, 8.5),
+    Laptop("ASUS ROG Zephyrus G14",     1199, 16,  512,  8.0, 1.65, True,  8.0, 9.2),
+    Laptop("HP Spectre x360 14",        1399, 16,  512, 17.0, 1.34, False, 8.5, 8.2),
+    Laptop("Microsoft Surface Laptop 5", 999, 16,  256, 17.0, 1.29, False, 8.3, 7.8),
+    Laptop("Razer Blade 15",            2499, 16,  512,  8.0, 2.01, True,  7.8, 9.4),
+    Laptop("Lenovo IdeaPad Flex 5",      699,  8,  512, 10.0, 1.50, False, 7.5, 7.0),
+    Laptop("Acer Swift 3",               599,  8,  256, 12.0, 1.20, False, 7.2, 6.8),
+]
+
+
+# ─────────────────────────────────────────────────────
+# 3. UTILITY FUNCTIONS
+# ─────────────────────────────────────────────────────
+def normalize(value: float, all_values: list, invert: bool = False) -> float:
+    """Scale a value to 0.0–1.0 relative to the full range."""
+    lo, hi = min(all_values), max(all_values)
+    if hi == lo:
+        return 1.0
+    score = (value - lo) / (hi - lo)
+    return 1.0 - score if invert else score
+
+
+def hard_filter(laptops: list, prefs: UserPreferences) -> list:
+    """
+    Remove options that violate hard constraints.
+    These are non-negotiable — utility doesn't matter if they fail.
+    """
+    filtered = []
+    for laptop in laptops:
+        if laptop.price > prefs.budget:
+            continue
+        if laptop.ram_gb < prefs.min_ram_gb:
+            continue
+        if laptop.battery_hrs < prefs.min_battery_hrs:
+            continue
+        if prefs.needs_gpu and not laptop.gpu:
+            continue
+        filtered.append(laptop)
+    return filtered
+
+
+def compute_utility(laptop: Laptop, prefs: UserPreferences, all_laptops: list) -> dict:
+    """
+    Score a laptop across all criteria using the user's weights.
+    Returns a breakdown dict with per-criterion scores + total utility.
+    """
+    # Pre-collect all values for normalization
+    prices    = [l.price        for l in all_laptops]
+    rams      = [l.ram_gb       for l in all_laptops]
+    batteries = [l.battery_hrs  for l in all_laptops]
+    weights   = [l.weight_kg    for l in all_laptops]
+    brands    = [l.brand_score  for l in all_laptops]
+    speeds    = [l.speed_score  for l in all_laptops]
+
+    # Normalized scores (0.0 = worst, 1.0 = best)
+    raw_scores = {
+        "price":       normalize(laptop.price,       prices,    invert=True),  # cheaper = better
+        "performance": normalize(laptop.speed_score, speeds),
+        "battery":     normalize(laptop.battery_hrs, batteries),
+        "portability": normalize(laptop.weight_kg,   weights,   invert=True),  # lighter = better
+        "reliability": normalize(laptop.brand_score, brands),
+    }
+
+    # Weighted utility
+    total = sum(prefs.priorities.get(k, 0) * v for k, v in raw_scores.items())
+
+    return {"scores": raw_scores, "total": round(total, 4)}
+
+
+def rank_options(laptops: list, prefs: UserPreferences, all_laptops: list) -> list:
+    """Score and sort all feasible options by utility."""
+    scored = []
+    for laptop in laptops:
+        utility = compute_utility(laptop, prefs, all_laptops)
+        scored.append((laptop, utility))
+    return sorted(scored, key=lambda x: x[1]["total"], reverse=True)
+
+
+# ─────────────────────────────────────────────────────
+# 4. AGENT
+# ─────────────────────────────────────────────────────
+def run_utility_agent(prefs: UserPreferences) -> None:
+    """
+    Full utility-based agent pipeline:
+      Perceive → Filter → Score → Rank → Act (recommend)
+    """
+    print(f"\n{'='*60}")
+    print(f"  Utility-Based Shopping Agent")
+    print(f"{'='*60}")
+    print(f"  Budget       : ${prefs.budget:,.0f}")
+    print(f"  Needs GPU    : {prefs.needs_gpu}")
+    print(f"  Min RAM      : {prefs.min_ram_gb}GB")
+    print(f"  Min Battery  : {prefs.min_battery_hrs}h")
+    print(f"  Priorities   : {prefs.priorities}")
+
+    # ── Step 1: Perceive (load catalog) ───────────────
+    print(f"\n  📦 Catalog loaded: {len(CATALOG)} laptops")
+
+    # ── Step 2: Hard filter ────────────────────────────
+    feasible = hard_filter(CATALOG, prefs)
+    eliminated = len(CATALOG) - len(feasible)
+    print(f"  🚫 Hard filter: {eliminated} eliminated, {len(feasible)} remain")
+
+    if not feasible:
+        print("\n  ❌ No laptops meet your hard requirements.")
+        print("     Try increasing your budget or relaxing constraints.")
+        return
+
+    # ── Step 3: Score & Rank ───────────────────────────
+    ranked = rank_options(feasible, prefs, CATALOG)
+
+    # ── Step 4: Act — present recommendation ──────────
+    print(f"\n{'─'*60}")
+    print(f"  🏆 RECOMMENDATION")
+    print(f"{'─'*60}")
+
+    best_laptop, best_utility = ranked[0]
+    scores = best_utility["scores"]
+
+    print(f"\n  ✅ Best Choice: {best_laptop.name}")
+    print(f"     Price      : ${best_laptop.price:,.0f}")
+    print(f"     RAM        : {best_laptop.ram_gb}GB")
+    print(f"     Battery    : {best_laptop.battery_hrs}h")
+    print(f"     Weight     : {best_laptop.weight_kg}kg")
+    print(f"     GPU        : {'Yes' if best_laptop.gpu else 'No'}")
+    print(f"\n  📊 Utility Breakdown  (weight × score = contribution)")
+    print(f"  {'Criterion':<14} {'Weight':>7}  {'Score':>7}  {'Contribution':>13}")
+    print(f"  {'─'*46}")
+    for criterion, weight in prefs.priorities.items():
+        s = scores[criterion]
+        contribution = weight * s
+        bar = "█" * int(s * 12)
+        print(f"  {criterion:<14} {weight:>6.0%}  {s:>6.2f}   {contribution:>7.4f}  {bar}")
+    print(f"  {'─'*46}")
+    print(f"  {'TOTAL UTILITY':<14} {'':>7}  {'':>7}  {best_utility['total']:>13.4f}")
+
+    # ── Step 5: Show top-3 alternatives ───────────────
+    print(f"\n{'─'*60}")
+    print(f"  📋 ALL FEASIBLE OPTIONS (ranked by utility)")
+    print(f"{'─'*60}")
+    print(f"  {'Rank':<5} {'Laptop':<28} {'Price':>7}  {'Utility':>8}")
+    print(f"  {'─'*55}")
+    for i, (laptop, utility) in enumerate(ranked):
+        medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"  {i+1}."
+        marker = " ← best" if i == 0 else ""
+        print(f"  {medal}  {laptop.name:<28} ${laptop.price:>6.0f}  {utility['total']:>8.4f}{marker}")
+
+    # ── Explain the decision ───────────────────────────
+    top_priority = max(prefs.priorities, key=prefs.priorities.get)
+    print(f"\n  💡 Why {best_laptop.name}?")
+    print(f"     Your top priority is '{top_priority}' ({prefs.priorities[top_priority]:.0%} weight).")
+    print(f"     It scores {scores[top_priority]:.2f}/1.00 on that criterion,")
+    print(f"     and achieves the best weighted total across all your priorities.")
+
+
+# ─────────────────────────────────────────────────────
+# 5. PRESET PROFILES  (show agent with different users)
+# ─────────────────────────────────────────────────────
+PROFILES = {
+    "1": {
+        "label": "💼 Business traveller (budget-conscious, needs portability)",
+        "prefs": UserPreferences(
+            budget=1500,
+            needs_gpu=False,
+            min_ram_gb=16,
+            min_battery_hrs=10,
+            priorities={
+                "price":       0.30,
+                "portability": 0.30,
+                "battery":     0.25,
+                "reliability": 0.10,
+                "performance": 0.05,
+            }
+        )
+    },
+    "2": {
+        "label": "🎮 Gamer (performance & GPU first, budget flexible)",
+        "prefs": UserPreferences(
+            budget=2500,
+            needs_gpu=True,
+            min_ram_gb=16,
+            min_battery_hrs=5,
+            priorities={
+                "performance": 0.50,
+                "price":       0.20,
+                "reliability": 0.15,
+                "battery":     0.10,
+                "portability": 0.05,
+            }
+        )
+    },
+    "3": {
+        "label": "🎓 Student (tight budget, reliability, portability)",
+        "prefs": UserPreferences(
+            budget=999,
+            needs_gpu=False,
+            min_ram_gb=8,
+            min_battery_hrs=8,
+            priorities={
+                "price":       0.40,
+                "reliability": 0.25,
+                "battery":     0.20,
+                "portability": 0.10,
+                "performance": 0.05,
+            }
+        )
+    },
+    "4": {
+        "label": "🎨 Creative pro (performance + reliability, GPU nice-to-have)",
+        "prefs": UserPreferences(
+            budget=2000,
+            needs_gpu=False,
+            min_ram_gb=16,
+            min_battery_hrs=8,
+            priorities={
+                "performance": 0.35,
+                "reliability": 0.30,
+                "battery":     0.20,
+                "price":       0.10,
+                "portability": 0.05,
+            }
+        )
+    },
+}
+
+
+# ─────────────────────────────────────────────────────
+# 6. MAIN
+# ─────────────────────────────────────────────────────
+def main():
+    print("╔══════════════════════════════════════════╗")
+    print("║   Utility-Based Agent — Laptop Advisor   ║")
+    print("╚══════════════════════════════════════════╝")
+    print("\nSelect a user profile:")
+    for key, val in PROFILES.items():
+        print(f"  [{key}] {val['label']}")
+    print("  [5] Custom")
+
+    choice = input("\nEnter choice (1-5): ").strip()
+
+    if choice in PROFILES:
+        run_utility_agent(PROFILES[choice]["prefs"])
+    else:
+        print("\nCustom profile — enter your preferences:")
+        budget    = float(input("  Max budget ($): "))
+        needs_gpu = input("  Need GPU? (y/n): ").lower() == "y"
+        min_ram   = int(input("  Min RAM (GB, e.g. 8 or 16): "))
+        min_bat   = float(input("  Min battery (hours, e.g. 8): "))
+
+        print("\n  Distribute 100 points across criteria:")
+        criteria = ["price", "performance", "battery", "portability", "reliability"]
+        weights  = {}
+        remaining = 100
+        for i, c in enumerate(criteria):
+            if i == len(criteria) - 1:
+                w = remaining
+                print(f"    {c}: {w} (auto)")
+            else:
+                w = int(input(f"    {c} (remaining {remaining}): "))
+                remaining -= w
+            weights[c] = w / 100.0
+
+        prefs = UserPreferences(
+            budget=budget,
+            needs_gpu=needs_gpu,
+            min_ram_gb=min_ram,
+            min_battery_hrs=min_bat,
+            priorities=weights,
+        )
+        run_utility_agent(prefs)
+
+
+if __name__ == "__main__":
+    main()
