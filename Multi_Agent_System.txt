@@ -1,0 +1,626 @@
+Multi-Agent System (MAS)
+What is a Multi-Agent System?
+
+A Multi-Agent System (MAS) is a system where multiple intelligent agents work together as a team to solve a problem or complete a task. 🤖🤝🤖
+
+In earlier agent types, a single agent worked alone. In a MAS, however, several specialized agents collaborate, each handling a specific responsibility.
+
+You can think of it like a company with different departments, where every department performs its role but works toward a common objective.
+
+Key ideas of a MAS:
+
+Each agent has a specific role
+
+Agents communicate with each other using messages
+
+A manager or orchestrator coordinates the workflow
+
+Information flows between agents until the final result is produced
+
+How a Multi-Agent System Works
+
+In a MAS, tasks are often divided into smaller specialized steps. Each agent performs its part and passes the result to the next agent.
+
+Example workflow:
+
+            [Orchestrator / Manager]
+           /           |           \
+     [Researcher]   [Analyst]   [Writer]
+          |              |           |
+      search web     process data  write report
+          \              |           /
+           └────────── [Output] ──────────┘
+
+Explanation of roles:
+
+Orchestrator / Manager – decides which agent should perform each task
+
+Researcher Agent – gathers information from sources
+
+Analyst Agent – analyzes or processes the collected data
+
+Writer Agent – converts results into a readable report
+
+Together, they produce the final output.
+
+Why Multi-Agent Systems Are Powerful
+
+Multi-Agent Systems are useful because they:
+
+divide complex tasks into smaller specialized tasks
+
+allow agents to work in parallel
+
+improve efficiency and scalability
+
+mimic real-world teamwork
+
+Real-World Example
+
+Imagine an AI research assistant system.
+
+A research agent collects information from the web
+
+A data analysis agent processes and summarizes the data 
+
+A writing agent creates a structured report
+
+The orchestrator manages the workflow and combines the results.
+
+Modern agentic frameworks like AutoGen, CrewAI, and Claude use this multi-agent collaboration model to build advanced AI systems. 
+
+
+"""
+Multi-Agent System (MAS) — Research Pipeline
+=============================================
+Architecture:
+  Orchestrator  → breaks goal into tasks, routes to specialists
+  Researcher    → gathers raw information on sub-topics
+  Analyst       → evaluates quality, scores coverage, flags gaps
+  Writer        → drafts polished report sections
+  Reviewer      → QA pass, requests revisions if needed
+
+Message Passing:
+  Agents communicate via a shared Mailbox (message queue).
+  Every agent reads messages addressed to it, acts, and sends results on.
+
+Run:
+  pip install anthropic
+  export ANTHROPIC_API_KEY=your_key_here
+  python multi_agent_system.py
+"""
+
+import json
+import time
+import anthropic
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+
+# ─────────────────────────────────────────────────────
+# 1. MESSAGE BUS  (how agents talk to each other)
+# ─────────────────────────────────────────────────────
+@dataclass
+class Message:
+    sender:    str
+    recipient: str
+    type:      str          # "task" | "result" | "revision_request" | "approved"
+    content:   dict
+    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
+    id:        int = 0
+
+
+class Mailbox:
+    """Shared message bus. Agents post and read messages here."""
+
+    def __init__(self):
+        self._messages: list[Message] = []
+        self._counter  = 0
+        self._log: list[Message] = []   # full audit trail
+
+    def send(self, msg: Message):
+        self._counter += 1
+        msg.id = self._counter
+        self._messages.append(msg)
+        self._log.append(msg)
+        print(f"  📨 [{msg.timestamp}] {msg.sender:12} → {msg.recipient:12}  [{msg.type}]")
+
+    def receive(self, agent_name: str) -> list[Message]:
+        """Pop all messages addressed to agent_name."""
+        inbox     = [m for m in self._messages if m.recipient == agent_name]
+        self._messages = [m for m in self._messages if m.recipient != agent_name]
+        return inbox
+
+    def full_log(self) -> list[Message]:
+        return self._log
+
+
+# ─────────────────────────────────────────────────────
+# 2. BASE AGENT
+# ─────────────────────────────────────────────────────
+class BaseAgent:
+    def __init__(self, name: str, role: str, mailbox: Mailbox, client: anthropic.Anthropic):
+        self.name    = name
+        self.role    = role
+        self.mailbox = mailbox
+        self.client  = client
+        self.memory: list[dict] = []   # agent's own conversation history
+
+    def think(self, system: str, user_prompt: str, max_tokens: int = 1500) -> str:
+        """Call Claude as this agent's reasoning engine."""
+        self.memory.append({"role": "user", "content": user_prompt})
+        response = self.client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=max_tokens,
+            system=system,
+            messages=self.memory,
+        )
+        reply = response.content[0].text
+        self.memory.append({"role": "assistant", "content": reply})
+        return reply
+
+    def send(self, recipient: str, msg_type: str, content: dict):
+        self.mailbox.send(Message(
+            sender=self.name, recipient=recipient,
+            type=msg_type, content=content
+        ))
+
+    def run(self):
+        raise NotImplementedError
+
+
+# ─────────────────────────────────────────────────────
+# 3. ORCHESTRATOR AGENT
+# ─────────────────────────────────────────────────────
+class OrchestratorAgent(BaseAgent):
+    def __init__(self, mailbox, client):
+        super().__init__("Orchestrator", "Manager", mailbox, client)
+
+    def run(self, goal: str):
+        print(f"\n{'─'*56}\n  🎯 Orchestrator: Planning research on '{goal}'\n{'─'*56}")
+
+        plan_prompt = f"""
+You are a research orchestrator. Break this research goal into exactly 3 focused sub-topics.
+
+Research goal: {goal}
+
+Respond ONLY with a valid JSON object, no markdown, no explanation:
+{{
+  "sub_topics": [
+    {{"id": 1, "topic": "...", "focus": "what specifically to find"}},
+    {{"id": 2, "topic": "...", "focus": "what specifically to find"}},
+    {{"id": 3, "topic": "...", "focus": "what specifically to find"}}
+  ],
+  "report_title": "...",
+  "report_goal": "one sentence describing the ideal final report"
+}}
+"""
+        raw = self.think(
+            system="You are a precise research orchestrator. Always respond with valid JSON only.",
+            user_prompt=plan_prompt
+        )
+
+        plan = json.loads(raw.strip())
+        print(f"  Plan: {len(plan['sub_topics'])} sub-topics identified")
+        for t in plan["sub_topics"]:
+            print(f"    {t['id']}. {t['topic']}")
+
+        # Dispatch research tasks to Researcher
+        for sub in plan["sub_topics"]:
+            self.send("Researcher", "task", {
+                "sub_topic_id": sub["id"],
+                "topic":        sub["topic"],
+                "focus":        sub["focus"],
+                "report_goal":  plan["report_goal"],
+            })
+
+        return plan
+
+
+# ─────────────────────────────────────────────────────
+# 4. RESEARCHER AGENT
+# ─────────────────────────────────────────────────────
+class ResearcherAgent(BaseAgent):
+    def __init__(self, mailbox, client):
+        super().__init__("Researcher", "Information Gatherer", mailbox, client)
+
+    def run(self) -> list[dict]:
+        tasks    = self.mailbox.receive("Researcher")
+        findings = []
+
+        for task in tasks:
+            t = task.content
+            print(f"\n  🔍 Researcher: Investigating '{t['topic']}'")
+
+            raw = self.think(
+                system=(
+                    "You are a thorough research specialist. "
+                    "Provide factual, detailed findings. "
+                    "Respond ONLY with valid JSON, no markdown."
+                ),
+                user_prompt=f"""
+Research this sub-topic in depth:
+
+Topic:  {t['topic']}
+Focus:  {t['focus']}
+Goal:   {t['report_goal']}
+
+Respond ONLY with this JSON:
+{{
+  "sub_topic_id": {t['sub_topic_id']},
+  "topic": "{t['topic']}",
+  "key_facts": ["fact 1", "fact 2", "fact 3", "fact 4"],
+  "statistics": ["stat 1", "stat 2"],
+  "examples": ["example 1", "example 2"],
+  "coverage_confidence": 0.0
+}}
+coverage_confidence is 0.0-1.0, how confident you are in coverage.
+"""
+            )
+
+            finding = json.loads(raw.strip())
+            findings.append(finding)
+            print(f"     Found {len(finding['key_facts'])} facts, "
+                  f"confidence: {finding['coverage_confidence']:.0%}")
+
+            # Send to Analyst
+            self.send("Analyst", "result", {
+                "finding": finding,
+                "report_goal": t["report_goal"],
+            })
+
+        return findings
+
+
+# ─────────────────────────────────────────────────────
+# 5. ANALYST AGENT
+# ─────────────────────────────────────────────────────
+class AnalystAgent(BaseAgent):
+    def __init__(self, mailbox, client):
+        super().__init__("Analyst", "Quality Evaluator", mailbox, client)
+
+    def run(self) -> list[dict]:
+        messages  = self.mailbox.receive("Analyst")
+        analyses  = []
+
+        for msg in messages:
+            finding     = msg.content["finding"]
+            report_goal = msg.content["report_goal"]
+
+            print(f"\n  📊 Analyst: Evaluating findings on '{finding['topic']}'")
+
+            raw = self.think(
+                system=(
+                    "You are a critical research analyst. "
+                    "Evaluate quality rigorously. "
+                    "Respond ONLY with valid JSON, no markdown."
+                ),
+                user_prompt=f"""
+Evaluate these research findings:
+
+Topic:    {finding['topic']}
+Facts:    {json.dumps(finding['key_facts'])}
+Stats:    {json.dumps(finding['statistics'])}
+Examples: {json.dumps(finding['examples'])}
+Goal:     {report_goal}
+
+Assess quality and identify what's missing.
+Respond ONLY with this JSON:
+{{
+  "sub_topic_id": {finding['sub_topic_id']},
+  "topic": "{finding['topic']}",
+  "quality_score": 0.0,
+  "strengths": ["strength 1", "strength 2"],
+  "gaps": ["gap 1", "gap 2"],
+  "ready_for_writing": true,
+  "analyst_notes": "brief notes for the writer"
+}}
+quality_score: 0.0-1.0. ready_for_writing: true if score >= 0.65.
+"""
+            )
+
+            analysis = json.loads(raw.strip())
+            analyses.append({"finding": finding, "analysis": analysis})
+
+            score = analysis["quality_score"]
+            ready = analysis["ready_for_writing"]
+            print(f"     Quality: {score:.0%}  |  Ready: {'✅' if ready else '⚠️ Needs work'}")
+
+            if ready:
+                self.send("Writer", "task", {
+                    "finding":  finding,
+                    "analysis": analysis,
+                    "report_goal": report_goal,
+                })
+            else:
+                # Send back to Researcher with gap info
+                print(f"     ⚠️  Gaps found — requesting additional research")
+                self.send("Researcher", "task", {
+                    "sub_topic_id": finding["sub_topic_id"],
+                    "topic":        finding["topic"],
+                    "focus":        f"Fill these gaps: {', '.join(analysis['gaps'])}",
+                    "report_goal":  report_goal,
+                })
+
+        return analyses
+
+
+# ─────────────────────────────────────────────────────
+# 6. WRITER AGENT
+# ─────────────────────────────────────────────────────
+class WriterAgent(BaseAgent):
+    def __init__(self, mailbox, client):
+        super().__init__("Writer", "Content Creator", mailbox, client)
+
+    def run(self) -> list[dict]:
+        tasks    = self.mailbox.receive("Writer")
+        sections = []
+
+        for task in tasks:
+            finding  = task.content["finding"]
+            analysis = task.content["analysis"]
+            goal     = task.content["report_goal"]
+
+            print(f"\n  ✍️  Writer: Drafting section on '{finding['topic']}'")
+
+            draft = self.think(
+                system=(
+                    "You are a professional technical writer. "
+                    "Write clear, engaging, well-structured prose. "
+                    "Respond ONLY with valid JSON, no markdown."
+                ),
+                user_prompt=f"""
+Write a report section using these inputs:
+
+Topic:          {finding['topic']}
+Key facts:      {json.dumps(finding['key_facts'])}
+Statistics:     {json.dumps(finding['statistics'])}
+Examples:       {json.dumps(finding['examples'])}
+Analyst notes:  {analysis['analyst_notes']}
+Report goal:    {goal}
+
+Respond ONLY with this JSON:
+{{
+  "sub_topic_id": {finding['sub_topic_id']},
+  "heading": "section heading",
+  "body": "3-4 paragraph section in clear prose. Use the facts and stats provided.",
+  "key_takeaway": "one-sentence summary of this section",
+  "word_count": 0
+}}
+Set word_count to the approximate word count of body.
+"""
+            )
+
+            section = json.loads(draft.strip())
+            section["word_count"] = len(section["body"].split())
+            sections.append(section)
+
+            print(f"     Section drafted: '{section['heading']}' "
+                  f"(~{section['word_count']} words)")
+
+            # Send to Reviewer
+            self.send("Reviewer", "result", {
+                "section":     section,
+                "finding":     finding,
+                "analysis":    analysis,
+                "report_goal": goal,
+            })
+
+        return sections
+
+
+# ─────────────────────────────────────────────────────
+# 7. REVIEWER AGENT
+# ─────────────────────────────────────────────────────
+class ReviewerAgent(BaseAgent):
+    def __init__(self, mailbox, client):
+        super().__init__("Reviewer", "Quality Assurance", mailbox, client)
+
+    def run(self) -> list[dict]:
+        messages        = self.mailbox.receive("Reviewer")
+        approved_sections = []
+
+        for msg in messages:
+            section  = msg.content["section"]
+            analysis = msg.content["analysis"]
+            goal     = msg.content["report_goal"]
+
+            print(f"\n  ✅ Reviewer: QA check on '{section['heading']}'")
+
+            raw = self.think(
+                system=(
+                    "You are a strict quality reviewer. "
+                    "Be critical but fair. "
+                    "Respond ONLY with valid JSON, no markdown."
+                ),
+                user_prompt=f"""
+Review this report section:
+
+Heading:     {section['heading']}
+Body:        {section['body']}
+Takeaway:    {section['key_takeaway']}
+Report goal: {goal}
+Gaps noted:  {json.dumps(analysis.get('gaps', []))}
+
+Respond ONLY with this JSON:
+{{
+  "sub_topic_id": {section['sub_topic_id']},
+  "approved": true,
+  "quality_score": 0.0,
+  "feedback": "specific feedback",
+  "improvements": ["improvement 1", "improvement 2"],
+  "final_heading": "approved or improved heading"
+}}
+approved: true if quality_score >= 0.70.
+"""
+            )
+
+            review = json.loads(raw.strip())
+            approved = review["approved"]
+            score    = review["quality_score"]
+
+            print(f"     Score: {score:.0%}  |  {'✅ Approved' if approved else '🔄 Revision needed'}")
+
+            if not approved:
+                print(f"     Feedback: {review['feedback'][:80]}...")
+                # Send back to Writer for revision
+                self.send("Writer", "task", {
+                    "finding":     msg.content["finding"],
+                    "analysis":    {**analysis, "analyst_notes": review["feedback"]},
+                    "report_goal": goal,
+                })
+            else:
+                # Finalize section with reviewer's heading
+                section["heading"]     = review["final_heading"]
+                section["review_score"] = score
+                approved_sections.append(section)
+
+        return approved_sections
+
+
+# ─────────────────────────────────────────────────────
+# 8. PIPELINE RUNNER
+# ─────────────────────────────────────────────────────
+def compile_report(title: str, sections: list[dict], log: list) -> str:
+    """Compile all approved sections into a final report."""
+    sections_sorted = sorted(sections, key=lambda s: s.get("sub_topic_id", 0))
+
+    lines = [
+        "=" * 60,
+        f"  {title}",
+        f"  Generated by Multi-Agent System",
+        f"  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "=" * 60,
+    ]
+
+    total_words = 0
+    for sec in sections_sorted:
+        lines += [
+            f"\n## {sec['heading']}",
+            "",
+            sec["body"],
+            "",
+            f"  ↳ Key takeaway: {sec['key_takeaway']}",
+            f"  ↳ Review score: {sec.get('review_score', 0):.0%}",
+        ]
+        total_words += sec.get("word_count", 0)
+
+    lines += [
+        "\n" + "=" * 60,
+        f"  Report stats: {len(sections)} sections | ~{total_words} words",
+        f"  Agent messages: {len(log)} total",
+        "=" * 60,
+    ]
+
+    return "\n".join(lines)
+
+
+def run_mas(goal: str) -> str:
+    """Run the full multi-agent pipeline."""
+    client  = anthropic.Anthropic()
+    mailbox = Mailbox()
+
+    # Instantiate all agents
+    orchestrator = OrchestratorAgent(mailbox, client)
+    researcher   = ResearcherAgent(mailbox, client)
+    analyst      = AnalystAgent(mailbox, client)
+    writer       = WriterAgent(mailbox, client)
+    reviewer     = ReviewerAgent(mailbox, client)
+
+    print(f"\n{'═'*60}")
+    print(f"  Multi-Agent System Starting")
+    print(f"  Goal: {goal}")
+    print(f"{'═'*60}")
+    print(f"\n  Agents: Orchestrator → Researcher → Analyst → Writer → Reviewer")
+    print(f"  Message bus: active\n")
+
+    # ── Phase 1: Plan ──────────────────────────────────
+    print(f"\n{'─'*56}")
+    print(f"  PHASE 1: ORCHESTRATION")
+    print(f"{'─'*56}")
+    plan = orchestrator.run(goal)
+
+    # ── Phase 2: Research ──────────────────────────────
+    print(f"\n{'─'*56}")
+    print(f"  PHASE 2: RESEARCH")
+    print(f"{'─'*56}")
+    researcher.run()
+
+    # ── Phase 3: Analysis ──────────────────────────────
+    print(f"\n{'─'*56}")
+    print(f"  PHASE 3: ANALYSIS")
+    print(f"{'─'*56}")
+    analyst.run()
+
+    # Handle any re-research requests from analyst
+    if mailbox.receive("Researcher"):
+        print(f"\n  🔄 Re-research requested — running second pass")
+        researcher.run()
+        analyst.run()
+
+    # ── Phase 4: Writing ───────────────────────────────
+    print(f"\n{'─'*56}")
+    print(f"  PHASE 4: WRITING")
+    print(f"{'─'*56}")
+    writer.run()
+
+    # ── Phase 5: Review ────────────────────────────────
+    print(f"\n{'─'*56}")
+    print(f"  PHASE 5: REVIEW & QA")
+    print(f"{'─'*56}")
+    approved = reviewer.run()
+
+    # Handle revision requests
+    revision_tasks = mailbox.receive("Writer")
+    if revision_tasks:
+        print(f"\n  🔄 Revisions requested — running second writing pass")
+        for t in revision_tasks:
+            mailbox.send(Message("Reviewer", "Writer", "task", t.content))
+        writer.run()
+        approved += reviewer.run()
+
+    # ── Phase 6: Compile ───────────────────────────────
+    print(f"\n{'─'*56}")
+    print(f"  PHASE 6: COMPILING REPORT")
+    print(f"{'─'*56}")
+
+    report = compile_report(plan["report_title"], approved, mailbox.full_log())
+
+    # ── Summary ────────────────────────────────────────
+    log = mailbox.full_log()
+    print(f"\n{'─'*56}")
+    print(f"  Pipeline complete!")
+    print(f"  Messages exchanged : {len(log)}")
+    print(f"  Sections approved  : {len(approved)}")
+    print(f"{'─'*56}")
+
+    return report
+
+
+# ─────────────────────────────────────────────────────
+# 9. MAIN
+# ─────────────────────────────────────────────────────
+def main():
+    print("╔══════════════════════════════════════════╗")
+    print("║   Multi-Agent Research System            ║")
+    print("║   5 agents • message passing • pipeline  ║")
+    print("╚══════════════════════════════════════════╝")
+
+    goal = input("\nResearch topic (or Enter for default):\n> ").strip()
+    if not goal:
+        goal = "The rise of agentic AI: capabilities, use cases, and risks"
+
+    report = run_mas(goal)
+    print(report)
+
+    save = input("\nSave report to file? (y/n): ").strip().lower()
+    if save == "y":
+        fname = f"report_{datetime.now().strftime('%H%M%S')}.txt"
+        with open(fname, "w") as f:
+            f.write(report)
+        print(f"Saved to {fname}")
+
+
+if __name__ == "__main__":
+    main()
