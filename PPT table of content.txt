@@ -1,0 +1,188 @@
+1. Introduction to Agentic AI
+
+What is Artificial Intelligence
+
+Evolution from traditional AI to Agentic AI
+
+What is Agentic AI
+
+Need for Agentic AI in modern systems
+
+2. Core Concepts of Agentic AI
+
+Intelligent Agents – Definition
+
+Environment, Perception, and Action
+
+Agent Architecture
+
+Agent Function
+
+3. Characteristics of Agentic AI
+
+Autonomy
+
+Goal-oriented behavior
+
+Decision-making capability
+
+Adaptability and learning
+
+Tool usage and reasoning
+
+4. Agent Workflow / Lifecycle
+
+Perception (Input gathering)
+
+Reasoning (Decision making)
+
+Planning (Task breakdown)
+
+Action (Execution)
+
+Learning (Feedback improvement loop)
+
+5. Types of Agents
+5.1 Simple Reflex Agents
+
+Definition
+
+Working (IF–THEN rules)
+
+Advantages & Limitations
+
+5.2 Model-Based Agents
+
+Internal state (memory)
+
+Environment modeling
+
+Use cases
+
+5.3 Goal-Based Agents
+
+Goal-driven behavior
+
+Planning and ReAct loop
+
+Examples
+
+5.4 Utility-Based Agents
+
+Utility function
+
+Decision optimization
+
+Real-world examples
+
+5.5 Learning Agents
+
+Learning from feedback
+
+Components:
+
+Learning Element
+
+Performance Element
+
+Critic
+
+Problem Generator
+
+6. Multi-Agent Systems (MAS)
+
+Definition of MAS
+
+Characteristics of MAS
+
+Communication between agents
+
+Coordination and collaboration
+
+Advantages and challenges
+
+7. Hierarchical Agent Systems
+
+Definition
+
+Layered structure (Strategic, Tactical, Operational)
+
+Task delegation and control
+
+MAS vs Hierarchical comparison
+
+8. Agent Architectures
+
+Reactive Architecture
+
+Deliberative Architecture
+
+Hybrid Architecture
+
+9. Agent Frameworks & Tools
+
+LangChain
+
+AutoGen
+
+CrewAI
+
+Role of LLMs like GPT-4
+
+10. Applications of Agentic AI
+
+Virtual assistants
+
+Customer support systems
+
+Autonomous robots
+
+Business process automation
+
+AI research assistants
+
+11. Advantages of Agentic AI
+
+Automation of complex tasks
+
+Improved efficiency
+
+Scalability
+
+Better decision-making
+
+12. Challenges and Limitations
+
+High complexity
+
+Cost of implementation
+
+Coordination issues in MAS
+
+Ethical and security concerns
+
+13. Future of Agentic AI
+
+Autonomous organizations
+
+Advanced AI assistants
+
+Human-AI collaboration
+
+AI-driven decision systems
+
+14. Conclusion
+
+Summary of key concepts
+
+Importance of Agentic AI
+
+Final insights
+
+15. References
+
+Books
+
+Research papers
+
+Online resources
