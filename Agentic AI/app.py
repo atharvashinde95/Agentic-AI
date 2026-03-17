@@ -296,13 +296,12 @@ with st.sidebar:
     )
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Config ──
-    st.markdown("### Configuration")
-    api_key  = st.text_input("API Key", type="password", placeholder="Paste Capgemini key…", label_visibility="visible")
-    base_url = st.text_input("Engine URL", placeholder="https://your-engine/v1", label_visibility="visible")
-
-    if api_key:  os.environ["CAPGEMINI_API_KEY"]  = api_key
-    if base_url: os.environ["CAPGEMINI_BASE_URL"] = base_url
+    # ── Status — loaded from .env, no UI inputs needed ──
+    api_ready = bool(os.getenv("CAPGEMINI_API_KEY") and os.getenv("CAPGEMINI_BASE_URL"))
+    if api_ready:
+        st.success("✅ Connected via .env", icon=None)
+    else:
+        st.error("⚠️ Check your .env file")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -387,8 +386,8 @@ if run_btn:
     if not question.strip():
         st.warning("Please enter a math question first.")
         st.stop()
-    if not api_key:
-        st.warning("Enter your Capgemini API Key in the sidebar to continue.")
+    if not os.getenv("CAPGEMINI_API_KEY"):
+        st.error("CAPGEMINI_API_KEY not found in .env — please add it and restart.")
         st.stop()
 
     with st.spinner(""):
