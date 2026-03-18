@@ -72,6 +72,25 @@ STATUS_COLOR = {
 }
 
 # ══════════════════════════════════════════════════════════
+#  Thread-safe results store
+#  (never touch st.session_state from a background thread)
+# ══════════════════════════════════════════════════════════
+_results_lock  = threading.Lock()
+_results_store: dict = {}          # machine_id → result dict
+_agent_running = threading.Event() # set = running, clear = idle
+
+
+def _set_result(machine_id: str, result: dict):
+    with _results_lock:
+        _results_store[machine_id] = result
+
+
+def _get_result(machine_id: str) -> dict | None:
+    with _results_lock:
+        return _results_store.get(machine_id)
+
+
+# ══════════════════════════════════════════════════════════
 #  Chart builders
 # ══════════════════════════════════════════════════════════
 def build_sensor_chart(machine_id: str) -> go.Figure:
@@ -120,11 +139,7 @@ def build_sensor_chart(machine_id: str) -> go.Figure:
 
 
 def build_fleet_bar(all_latest: dict) -> go.Figure:
-    """
-    Fleet overview — 3 subplots always visible side by side.
-    Temperature / Vibration / Pressure each get their own panel.
-    No toggling — no disappearing bars.
-    """
+    """3 always-visible subplots — Temperature / Vibration / Pressure."""
     machines, temps, vibs, pres, colors = [], [], [], [], []
     for mid, r in all_latest.items():
         if r:
@@ -146,40 +161,24 @@ def build_fleet_bar(all_latest: dict) -> go.Figure:
         horizontal_spacing=0.08,
     )
 
-    # Temperature — red shades
     fig.add_trace(go.Bar(
-        x=machines, y=temps,
-        marker_color=colors,
-        text=[f"{v:.1f}" for v in temps],
-        textposition="outside",
-        textfont=dict(size=11, color="#ccc"),
-        showlegend=False,
-        name="Temp °C",
+        x=machines, y=temps, marker_color=colors,
+        text=[f"{v:.1f}" for v in temps], textposition="outside",
+        textfont=dict(size=11, color="#ccc"), showlegend=False, name="Temp °C",
     ), row=1, col=1)
 
-    # Vibration — orange shades
     fig.add_trace(go.Bar(
-        x=machines, y=vibs,
-        marker_color=colors,
-        text=[f"{v:.3f}" for v in vibs],
-        textposition="outside",
-        textfont=dict(size=11, color="#ccc"),
-        showlegend=False,
-        name="Vib mm/s",
+        x=machines, y=vibs, marker_color=colors,
+        text=[f"{v:.3f}" for v in vibs], textposition="outside",
+        textfont=dict(size=11, color="#ccc"), showlegend=False, name="Vib mm/s",
     ), row=1, col=2)
 
-    # Pressure — blue shades
     fig.add_trace(go.Bar(
-        x=machines, y=pres,
-        marker_color=colors,
-        text=[f"{v:.1f}" for v in pres],
-        textposition="outside",
-        textfont=dict(size=11, color="#ccc"),
-        showlegend=False,
-        name="Pres bar",
+        x=machines, y=pres, marker_color=colors,
+        text=[f"{v:.1f}" for v in pres], textposition="outside",
+        textfont=dict(size=11, color="#ccc"), showlegend=False, name="Pres bar",
     ), row=1, col=3)
 
-    # threshold reference lines
     fig.add_hline(y=72,   line_dash="dot",  line_color="#ffab00", line_width=1, row=1, col=1)
     fig.add_hline(y=90,   line_dash="dash", line_color="#ff5252", line_width=1, row=1, col=1)
     fig.add_hline(y=0.85, line_dash="dot",  line_color="#ffab00", line_width=1, row=1, col=2)
@@ -188,40 +187,32 @@ def build_fleet_bar(all_latest: dict) -> go.Figure:
     fig.add_hline(y=46,   line_dash="dash", line_color="#ff5252", line_width=1, row=1, col=3)
 
     fig.update_layout(
-        height=280,
-        paper_bgcolor="#0f1117",
-        plot_bgcolor="#0f1117",
-        font=dict(color="#ccc", size=11),
-        margin=dict(l=40, r=40, t=40, b=20),
+        height=280, paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
+        font=dict(color="#ccc", size=11), margin=dict(l=40, r=40, t=40, b=20),
     )
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(gridcolor="#1e2130", showgrid=True)
-
     return fig
 
 
 def _style_fig(fig):
     fig.update_layout(
-        height=400,
-        paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
-        font=dict(color="#ccc", size=11),
-        margin=dict(l=50, r=20, t=40, b=20),
+        height=400, paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
+        font=dict(color="#ccc", size=11), margin=dict(l=50, r=20, t=40, b=20),
     )
     fig.update_xaxes(showgrid=False, tickangle=-30)
     fig.update_yaxes(gridcolor="#1e2130")
 
 
 # ══════════════════════════════════════════════════════════
-#  Session state
+#  Session state init
 # ══════════════════════════════════════════════════════════
 def _init():
     defaults = {
-        "sim_started":    False,
-        "results":        {},
-        "agent_running":  False,
-        "auto_run":       False,
-        "last_auto":      0.0,
-        "selected":       "M1",
+        "sim_started": False,
+        "auto_run":    False,
+        "last_auto":   0.0,
+        "selected":    "M1",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -237,15 +228,20 @@ if not st.session_state["sim_started"]:
 
 
 # ══════════════════════════════════════════════════════════
-#  Agent runner (background thread)
+#  Agent runner — uses module-level store, NOT session_state
 # ══════════════════════════════════════════════════════════
 def _run_agent(machine_id: str):
+    """Spawn background thread. Result written to _results_store (thread-safe)."""
     def _worker():
-        st.session_state["agent_running"] = True
-        result = agent.run(machine_id)
-        st.session_state["results"][machine_id] = result
-        st.session_state["agent_running"] = False
-    threading.Thread(target=_worker, daemon=True).start()
+        _agent_running.set()
+        try:
+            result = agent.run(machine_id)
+            _set_result(machine_id, result)
+        finally:
+            _agent_running.clear()
+
+    if not _agent_running.is_set():
+        threading.Thread(target=_worker, daemon=True).start()
 
 
 # ══════════════════════════════════════════════════════════
@@ -264,14 +260,12 @@ with st.sidebar:
     st.session_state["selected"] = selected
     st.divider()
 
-    if st.button(f"▶  Run Agent — {selected}",
-                 disabled=st.session_state["agent_running"],
-                 use_container_width=True):
+    running = _agent_running.is_set()
+
+    if st.button(f"▶  Run Agent — {selected}", disabled=running, use_container_width=True):
         _run_agent(selected)
 
-    if st.button("▶▶  Run Agent — All Machines",
-                 disabled=st.session_state["agent_running"],
-                 use_container_width=True):
+    if st.button("▶▶  Run Agent — All Machines", disabled=running, use_container_width=True):
         for m in MACHINES:
             _run_agent(m)
 
@@ -280,13 +274,13 @@ with st.sidebar:
         "Auto-run every 30 s", value=st.session_state["auto_run"]
     )
 
-    if st.session_state["agent_running"]:
+    if running:
         st.info("🤖 Agent is thinking…")
 
     st.divider()
     st.caption("Tick interval  : 5 sec")
     st.caption("Buffer size    : 20 readings")
-    st.caption(f"LLM            : amazon.nova.lite")
+    st.caption("LLM            : amazon.nova.lite")
 
 
 # ══════════════════════════════════════════════════════════
@@ -323,7 +317,7 @@ st.divider()
 
 # ── Fleet bar chart ───────────────────────────────────────
 st.subheader("Fleet Sensor Overview")
-st.plotly_chart(build_fleet_bar(all_latest), use_container_width=True)
+st.plotly_chart(build_fleet_bar(all_latest), width="stretch")
 
 st.divider()
 
@@ -334,13 +328,13 @@ with left:
     st.subheader(f"Live Sensors — {selected}")
     st.plotly_chart(
         build_sensor_chart(selected),
-        use_container_width=True,
+        width="stretch",
         key=f"chart_{selected}_{int(time.time()//5)}",
     )
 
 with right:
     st.subheader("Agent Reasoning")
-    result = st.session_state["results"].get(selected)
+    result = _get_result(selected)
     if not result:
         st.info("Run the agent to see its step-by-step reasoning here.")
     else:
@@ -370,7 +364,7 @@ st.divider()
 
 # ── Agent report ──────────────────────────────────────────
 st.subheader(f"Maintenance Report — {selected}")
-result = st.session_state["results"].get(selected)
+result = _get_result(selected)
 if result and result.get("final_report"):
     st.markdown(
         f'<div class="report-box">'
@@ -399,7 +393,7 @@ if log:
 
     st.dataframe(
         df_log.style.apply(_row_color, axis=1),
-        use_container_width=True,
+        width="stretch",
         height=240,
     )
 else:
@@ -411,10 +405,10 @@ st.divider()
 st.subheader("Session Summary")
 s = agent.memory.summary()
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total agent runs",  s["total"])
-c2.metric("Alerts fired",      s["alerts"])
-c3.metric("Jobs scheduled",    s["jobs"])
-c4.metric("Machines monitored",s["machines"])
+c1.metric("Total agent runs",   s["total"])
+c2.metric("Alerts fired",       s["alerts"])
+c3.metric("Jobs scheduled",     s["jobs"])
+c4.metric("Machines monitored", s["machines"])
 
 # ── Auto-run logic ────────────────────────────────────────
 if st.session_state["auto_run"]:
