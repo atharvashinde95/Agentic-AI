@@ -405,37 +405,35 @@ if run_btn:
     result_step = next((s for s in steps if s["type"] == "result"), None)
 
     st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("---")
     st.markdown('<div class="section-label">Agent Trace</div>', unsafe_allow_html=True)
 
-    # ── Two-column trace ──────────────────────────────
+    # Two-column trace
     if call_step or result_step:
         col_l, col_r = st.columns(2, gap="large")
 
         with col_l:
             expr = call_step["expression"] if call_step else "—"
             st.markdown(f"""
-<div class="trace-label llm">🤖 &nbsp;LLM — Tool Decision</div>
+<div class="trace-label llm">🤖 &nbsp;Step 1 — LLM Tool Decision</div>
 <div class="trace-card llm">
   Chose tool &nbsp;&nbsp;: <span class="chip blue">calculate</span><br>
   Expression : <span class="chip blue">{expr}</span><br><br>
-  <span style="color:#444;font-size:11px;">The LLM extracted the numeric expression<br>from your question and called the tool.</span>
+  <span style="color:#555;font-size:11px;">LLM extracted the expression and called the tool.<br>It did NOT compute the answer itself.</span>
 </div>""", unsafe_allow_html=True)
 
         with col_r:
             output = result_step["output"] if result_step else "—"
             st.markdown(f"""
-<div class="trace-label tool">⚙️ &nbsp;Python — Tool Result</div>
+<div class="trace-label tool">⚙️ &nbsp;Step 2 — Python Tool Result</div>
 <div class="trace-card tool">
   Result &nbsp;&nbsp;&nbsp;&nbsp;: <span class="chip green">{output}</span><br><br>
-  <br>
-  <span style="color:#444;font-size:11px;">Python's AST parser evaluated the expression.<br>No arithmetic was done by the LLM.</span>
+  <span style="color:#555;font-size:11px;">Python AST ran the expression — real answer.<br>LLM used this to form its reply.</span>
 </div>""", unsafe_allow_html=True)
 
     else:
         st.info("No tool was called — question may not require math.")
-
-    # ── Answer box ────────────────────────────────────
     st.markdown(f"""
 <div class="answer-box">
   <div class="answer-label">✦ &nbsp;Final Answer</div>
