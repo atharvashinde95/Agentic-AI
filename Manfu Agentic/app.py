@@ -120,7 +120,11 @@ def build_sensor_chart(machine_id: str) -> go.Figure:
 
 
 def build_fleet_bar(all_latest: dict) -> go.Figure:
-    """Horizontal health overview bar for all machines."""
+    """
+    Fleet overview — 3 subplots always visible side by side.
+    Temperature / Vibration / Pressure each get their own panel.
+    No toggling — no disappearing bars.
+    """
     machines, temps, vibs, pres, colors = [], [], [], [], []
     for mid, r in all_latest.items():
         if r:
@@ -130,18 +134,69 @@ def build_fleet_bar(all_latest: dict) -> go.Figure:
             pres.append(r["pressure"])
             colors.append(STATUS_COLOR.get(r["status"], "#aaa"))
 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(name="Temp °C",   x=machines, y=temps, marker_color=colors))
-    fig.add_trace(go.Bar(name="Vib mm/s",  x=machines, y=vibs,  marker_color=colors, visible="legendonly"))
-    fig.add_trace(go.Bar(name="Pres bar",  x=machines, y=pres,  marker_color=colors, visible="legendonly"))
-    fig.update_layout(
-        barmode="group", height=220,
-        paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
-        font=dict(color="#ccc", size=11),
-        margin=dict(l=40, r=20, t=20, b=30),
-        legend=dict(orientation="h", y=1.1),
+    if not machines:
+        fig = go.Figure()
+        fig.add_annotation(text="Warming up...", showarrow=False,
+                           xref="paper", yref="paper", x=0.5, y=0.5)
+        return fig
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=("Temperature (°C)", "Vibration (mm/s)", "Pressure (bar)"),
+        horizontal_spacing=0.08,
     )
-    fig.update_yaxes(gridcolor="#1e2130")
+
+    # Temperature — red shades
+    fig.add_trace(go.Bar(
+        x=machines, y=temps,
+        marker_color=colors,
+        text=[f"{v:.1f}" for v in temps],
+        textposition="outside",
+        textfont=dict(size=11, color="#ccc"),
+        showlegend=False,
+        name="Temp °C",
+    ), row=1, col=1)
+
+    # Vibration — orange shades
+    fig.add_trace(go.Bar(
+        x=machines, y=vibs,
+        marker_color=colors,
+        text=[f"{v:.3f}" for v in vibs],
+        textposition="outside",
+        textfont=dict(size=11, color="#ccc"),
+        showlegend=False,
+        name="Vib mm/s",
+    ), row=1, col=2)
+
+    # Pressure — blue shades
+    fig.add_trace(go.Bar(
+        x=machines, y=pres,
+        marker_color=colors,
+        text=[f"{v:.1f}" for v in pres],
+        textposition="outside",
+        textfont=dict(size=11, color="#ccc"),
+        showlegend=False,
+        name="Pres bar",
+    ), row=1, col=3)
+
+    # threshold reference lines
+    fig.add_hline(y=72,   line_dash="dot",  line_color="#ffab00", line_width=1, row=1, col=1)
+    fig.add_hline(y=90,   line_dash="dash", line_color="#ff5252", line_width=1, row=1, col=1)
+    fig.add_hline(y=0.85, line_dash="dot",  line_color="#ffab00", line_width=1, row=1, col=2)
+    fig.add_hline(y=1.80, line_dash="dash", line_color="#ff5252", line_width=1, row=1, col=2)
+    fig.add_hline(y=36,   line_dash="dot",  line_color="#ffab00", line_width=1, row=1, col=3)
+    fig.add_hline(y=46,   line_dash="dash", line_color="#ff5252", line_width=1, row=1, col=3)
+
+    fig.update_layout(
+        height=280,
+        paper_bgcolor="#0f1117",
+        plot_bgcolor="#0f1117",
+        font=dict(color="#ccc", size=11),
+        margin=dict(l=40, r=40, t=40, b=20),
+    )
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(gridcolor="#1e2130", showgrid=True)
+
     return fig
 
 
