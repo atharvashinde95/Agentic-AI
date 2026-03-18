@@ -1,15 +1,8 @@
-# Core LangChain stack — compatible set
-langchain>=0.2.0,<0.3.0
-langchain-openai>=0.1.0,<0.2.0
-langchain-core>=0.2.0,<0.3.0
- 
-# OpenAI client (used by langchain-openai under the hood)
-openai>=1.30.0,<2.0.0
- 
-# Dashboard
-streamlit>=1.35.0
-plotly>=5.20.0
-pandas>=2.0.0
- 
-# Utilities
-python-dotenv>=1.0.0
+langchain
+langchain-openai
+langchain-core
+openai
+streamlit
+plotly
+pandas
+python-dotenv
