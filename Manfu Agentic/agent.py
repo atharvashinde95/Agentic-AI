@@ -1,12 +1,14 @@
 # agent/agent.py
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 import threading
 from collections import deque
 from datetime import datetime
 
-from langchain.agents        import AgentExecutor, create_react_agent
-from langchain.prompts       import PromptTemplate
 from langchain_openai        import ChatOpenAI
-from langchain_core.callbacks import BaseCallbackHandler
+from langchain.agents        import AgentExecutor, create_openai_tools_agent
+from langchain_core.prompts  import ChatPromptTemplate, MessagesPlaceholder
 
 from tools       import ALL_TOOLS
 from core.config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, MAX_AGENT_ITERATIONS, MACHINES
@@ -14,36 +16,26 @@ from core.logger import agent_logger, error_logger
 
 
 # ══════════════════════════════════════════════════════════
-#  AgentMemory  —  short-term decisions + long-term action log
+#  AgentMemory
 # ══════════════════════════════════════════════════════════
 class AgentMemory:
-    """
-    Short-term : last 5 decisions per machine — prevents duplicate alerts.
-    Long-term  : full ordered action log for the dashboard history table.
-    """
-
     def __init__(self):
-        self._lock       = threading.Lock()
-        self._short:     dict[str, deque] = {}
-        self._action_log: list[dict]      = []
+        self._lock        = threading.Lock()
+        self._short:      dict[str, deque] = {}
+        self._action_log: list[dict]       = []
 
     def record(self, machine_id: str, action: str, detail: str = ""):
         entry = {
             "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "machine_id": machine_id,
             "action":     action,
-            "detail":     detail,
+            "detail":     detail[:200],
         }
         with self._lock:
             if machine_id not in self._short:
                 self._short[machine_id] = deque(maxlen=5)
             self._short[machine_id].append(entry)
             self._action_log.append(entry)
-
-    def was_recently_alerted(self, machine_id: str, within: int = 2) -> bool:
-        with self._lock:
-            recent = list(self._short.get(machine_id, []))[-within:]
-        return any(e["action"] in ("alert_sent", "maintenance_scheduled") for e in recent)
 
     def get_log(self, machine_id: str | None = None, n: int = 30) -> list[dict]:
         with self._lock:
@@ -66,83 +58,53 @@ class AgentMemory:
 # ══════════════════════════════════════════════════════════
 #  System prompt
 # ══════════════════════════════════════════════════════════
-_SYSTEM_PROMPT = """You are an expert industrial maintenance AI agent for a manufacturing plant.
+_SYSTEM = """You are an expert industrial maintenance AI agent for a manufacturing plant.
 Your job is to monitor machine sensor data in real time, detect anomalies, and autonomously
 take the correct maintenance action.
 
-You have access to the following tools:
-{tools}
-
-DECISION RULES — follow these strictly:
-1. ALWAYS start with get_sensor_reading to fetch live data.
+DECISION RULES — follow strictly:
+1. ALWAYS call get_sensor_reading first to fetch live data.
 2. ALWAYS call analyze_health second to get the health score.
-3. If health score is 40–74 (degraded), call detect_trend to check if worsening.
-4. Then take exactly ONE of these actions:
-   - Score >= 75                   → no action, machine is healthy
-   - Score 40–74 or rising trend   → call schedule_maintenance
-   - Score < 40 or critical sensor → call send_alert
-5. Never fire an alert for a single micro-spike — always look at the average.
-6. End with a clear maintenance report explaining what you found and what you did.
-
-Use this exact format:
-
-Question: {{input}}
-Thought: your reasoning about what to do next
-Action: tool name — must be one of [{tool_names}]
-Action Input: input to the tool
-Observation: tool result
-... repeat Thought / Action / Observation as needed ...
-Thought: I now have enough information to write the final report.
-Final Answer: your complete maintenance report
+3. If health score is 40-74 call detect_trend to check if worsening.
+4. Then take ONE action:
+   - Score >= 75                  → no action needed, machine is healthy
+   - Score 40-74 or rising trend  → call schedule_maintenance
+   - Score < 40 or critical sensor→ call send_alert
+5. Never fire an alert for a single spike — look at the average across readings.
+6. End with a clear report: what you found, what you did, and your recommendation.
 """
 
 
 # ══════════════════════════════════════════════════════════
-#  Thought logger — captures ReAct steps for dashboard display
+#  Thought logger
 # ══════════════════════════════════════════════════════════
-class _ThoughtLogger(BaseCallbackHandler):
-
+class _ThoughtLogger:
     def __init__(self):
         self.steps: list[dict] = []
 
-    def on_agent_action(self, action, **_):
-        self.steps.append({
-            "type":  "action",
-            "tool":  action.tool,
-            "input": str(action.tool_input),
-        })
+    def log_action(self, tool: str, tool_input: str):
+        self.steps.append({"type": "action", "tool": tool, "input": str(tool_input)})
 
-    def on_tool_end(self, output, **_):
-        self.steps.append({
-            "type":   "observation",
-            "output": str(output)[:600],
-        })
+    def log_observation(self, output: str):
+        self.steps.append({"type": "observation", "output": str(output)[:600]})
 
-    def on_agent_finish(self, finish, **_):
-        self.steps.append({
-            "type":   "final",
-            "output": finish.return_values.get("output", ""),
-        })
+    def log_final(self, output: str):
+        self.steps.append({"type": "final", "output": output})
 
     def clear(self):
         self.steps = []
 
 
 # ══════════════════════════════════════════════════════════
-#  MaintenanceAgent  —  the single agent
+#  MaintenanceAgent
 # ══════════════════════════════════════════════════════════
 class MaintenanceAgent:
-    """
-    One LangChain ReAct AgentExecutor powered by amazon.nova.lite.
-    Checks one machine per run — can be called concurrently from Streamlit.
-    """
-
     def __init__(self):
         self.memory  = AgentMemory()
-        self._logger = _ThoughtLogger()
         self._lock   = threading.Lock()
+        self._tlogger = _ThoughtLogger()
 
-        llm = ChatOpenAI(
+        self._llm = ChatOpenAI(
             model=LLM_MODEL,
             openai_api_key=LLM_API_KEY,
             openai_api_base=LLM_BASE_URL,
@@ -150,28 +112,35 @@ class MaintenanceAgent:
             max_tokens=1024,
         )
 
-        prompt   = PromptTemplate.from_template(_SYSTEM_PROMPT + "\n{agent_scratchpad}")
-        _agent   = create_react_agent(llm=llm, tools=ALL_TOOLS, prompt=prompt)
+        # openai_tools_agent is much more reliable than ReAct
+        # for models served via OpenAI-compatible endpoints
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", _SYSTEM),
+            ("human",  "{input}"),
+            MessagesPlaceholder("agent_scratchpad"),
+        ])
+
+        _agent = create_openai_tools_agent(
+            llm=self._llm,
+            tools=ALL_TOOLS,
+            prompt=prompt,
+        )
 
         self._executor = AgentExecutor(
             agent=_agent,
             tools=ALL_TOOLS,
-            verbose=False,
+            verbose=True,
             max_iterations=MAX_AGENT_ITERATIONS,
             handle_parsing_errors=True,
-            callbacks=[self._logger],
+            return_intermediate_steps=True,
         )
 
     def run(self, machine_id: str) -> dict:
-        """
-        Run the full ReAct loop for one machine.
-        Returns: { machine_id, final_report, thought_steps }
-        """
         if machine_id not in MACHINES:
             return {"error": f"Unknown machine: {machine_id}"}
 
         with self._lock:
-            self._logger.clear()
+            self._tlogger.clear()
 
         query = (
             f"Check machine {machine_id}. Fetch its live sensor readings, "
@@ -182,20 +151,32 @@ class MaintenanceAgent:
         try:
             result = self._executor.invoke({"input": query})
             report = result.get("output", "No output returned.")
+
+            # extract thought steps from intermediate_steps
+            for step in result.get("intermediate_steps", []):
+                action, observation = step
+                self._tlogger.log_action(
+                    tool=action.tool,
+                    tool_input=action.tool_input,
+                )
+                self._tlogger.log_observation(str(observation))
+
+            self._tlogger.log_final(report)
             agent_logger.info("Agent run complete | %s | %s", machine_id, report[:120])
             self.memory.record(machine_id, "agent_run", report[:120])
+
         except Exception as exc:
             report = f"Agent error: {exc}"
             error_logger.error("Agent run failed | %s | %s", machine_id, exc)
+            self._tlogger.log_final(report)
 
         return {
             "machine_id":    machine_id,
             "final_report":  report,
-            "thought_steps": list(self._logger.steps),
+            "thought_steps": list(self._tlogger.steps),
         }
 
     def run_all(self) -> list[dict]:
-        """Check all machines one by one."""
         return [self.run(mid) for mid in MACHINES]
 
 
