@@ -607,7 +607,7 @@ with right:
     cfg_items = [
         ("Framework",  "LangChain ReAct"),
         ("LLM",        "Amazon Nova Lite"),
-        ("Memory",     "ConversationBufferWindowMemory (k=6)"),
+        ("Memory",     "Rolling chat history window (k=6, deque)"),
         ("Tools",      "6 @tool functions"),
         ("Executor",   "AgentExecutor (max 8 iterations)"),
         ("Cycles",     str(result["cycle_count"] if result else 0)),
