@@ -1,9 +1,7 @@
 # dashboard/app.py
-import sys, os
+import sys, os, re, time, threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import time
-import threading
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,121 +9,146 @@ from plotly.subplots import make_subplots
 
 from simulator.simulator import simulator
 from agent.agent         import agent
-from core.config         import MACHINES, THRESHOLDS, AGENT_CHECK_INTERVAL
+from core.config         import MACHINES, THRESHOLDS
 
-# ══════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────
 #  Page config
-# ══════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Predictive Maintenance AI",
     page_icon="⚙️",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# ══════════════════════════════════════════════════════════
-#  CSS
-# ══════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-.metric-card {
-    background: #1e2130;
-    border-radius: 10px;
-    padding: 1rem 1.2rem;
-    border: 1px solid #2e3250;
-    margin-bottom: 0.5rem;
-    min-height: 130px;
+.card {
+    background:#1e2130; border-radius:12px; padding:1rem;
+    border:1px solid #2e3250; text-align:center; margin-bottom:6px;
 }
-.step-action {
-    background:#1a2e1a; border-left:3px solid #00c853;
-    padding:0.5rem 0.8rem; border-radius:0 6px 6px 0;
-    margin:3px 0; font-family:monospace; font-size:12px;
-}
-.step-obs {
-    background:#1a1a2e; border-left:3px solid #448aff;
-    padding:0.5rem 0.8rem; border-radius:0 6px 6px 0;
-    margin:3px 0; font-family:monospace; font-size:12px;
-}
-.step-final {
-    background:#2a1a2e; border-left:3px solid #ce93d8;
-    padding:0.5rem 0.8rem; border-radius:0 6px 6px 0;
-    margin:3px 0; font-family:monospace; font-size:12px;
-}
-.report-box {
-    background:#1e2130; border-radius:10px;
-    padding:1rem 1.2rem; border:1px solid #2e3250;
-    font-size:14px; line-height:1.75;
+.card-name   { font-size:22px; font-weight:700; }
+.card-status { font-size:13px; font-weight:600; margin:4px 0 8px; }
+.card-val    { font-size:12px; color:#aaa; line-height:1.9; }
+.box-tool  { background:#0d2b0d; border-left:4px solid #00c853;
+    padding:7px 12px; border-radius:0 8px 8px 0; margin:3px 0; font-size:13px; }
+.box-obs   { background:#0d0d2b; border-left:4px solid #4488ff;
+    padding:7px 12px; border-radius:0 8px 8px 0; margin:3px 0; font-size:13px; }
+.box-final { background:#1a0d2b; border-left:4px solid #bb86fc;
+    padding:7px 12px; border-radius:0 8px 8px 0; margin:3px 0; font-size:13px; }
+.report {
+    background:#1e2130; border-radius:10px; padding:1rem 1.2rem;
+    border:1px solid #2e3250; font-size:14px; line-height:1.9;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════
-#  Colour helpers
-# ══════════════════════════════════════════════════════════
-STATUS_COLOR = {
+# ─────────────────────────────────────────────────────────
+#  Colours
+# ─────────────────────────────────────────────────────────
+COLOR = {
     "normal":     "#00c853",
     "warning":    "#ffab00",
     "failure":    "#ff5252",
+    "recovering": "#40c4ff",
     "degrading":  "#ffab00",
     "critical":   "#ff5252",
-    "recovering": "#40c4ff",
 }
 
-# ══════════════════════════════════════════════════════════
-#  Thread-safe results store
-#  (never touch st.session_state from a background thread)
-# ══════════════════════════════════════════════════════════
-_results_lock  = threading.Lock()
-_results_store: dict = {}          # machine_id → result dict
-_agent_running = threading.Event() # set = running, clear = idle
+# ─────────────────────────────────────────────────────────
+#  Thread-safe result store (never touch session_state from a thread)
+# ─────────────────────────────────────────────────────────
+_store: dict    = {}
+_lock           = threading.Lock()
+_running        = threading.Event()
+
+def _save(mid, result):
+    with _lock:
+        _store[mid] = result
+
+def _load(mid):
+    with _lock:
+        return _store.get(mid)
+
+# ─────────────────────────────────────────────────────────
+#  Session state
+# ─────────────────────────────────────────────────────────
+if "started" not in st.session_state:
+    st.session_state["started"] = False
+
+if not st.session_state["started"]:
+    simulator.start()
+    st.session_state["started"] = True
+    time.sleep(2)
+
+# ─────────────────────────────────────────────────────────
+#  Agent runner helpers
+# ─────────────────────────────────────────────────────────
+def _run_one(mid: str):
+    """Run agent for a single machine in a background thread."""
+    if _running.is_set():
+        return
+    def _work():
+        _running.set()
+        try:
+            _save(mid, agent.run(mid))
+        finally:
+            _running.clear()
+    threading.Thread(target=_work, daemon=True).start()
 
 
-def _set_result(machine_id: str, result: dict):
-    with _results_lock:
-        _results_store[machine_id] = result
+def _run_all():
+    """Run agent for every machine sequentially in a background thread."""
+    if _running.is_set():
+        return
+    def _work():
+        _running.set()
+        try:
+            for mid in MACHINES:
+                _save(mid, agent.run(mid))
+        finally:
+            _running.clear()
+    threading.Thread(target=_work, daemon=True).start()
+
+# ─────────────────────────────────────────────────────────
+#  Chart helpers
+# ─────────────────────────────────────────────────────────
+def _style(fig, h=380):
+    fig.update_layout(
+        height=h, paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
+        font=dict(color="#ccc", size=11),
+        margin=dict(l=50, r=20, t=36, b=20),
+    )
+    fig.update_xaxes(showgrid=False, tickangle=-30)
+    fig.update_yaxes(gridcolor="#1e2130")
 
 
-def _get_result(machine_id: str) -> dict | None:
-    with _results_lock:
-        return _results_store.get(machine_id)
-
-
-# ══════════════════════════════════════════════════════════
-#  Chart builders
-# ══════════════════════════════════════════════════════════
-def build_sensor_chart(machine_id: str) -> go.Figure:
-    readings = simulator.get_readings(machine_id, n=20)
-
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
+def sensor_chart(mid: str) -> go.Figure:
+    rows = simulator.get_readings(mid, n=20)
+    fig  = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
         subplot_titles=("Temperature (°C)", "Vibration (mm/s)", "Pressure (bar)"),
         vertical_spacing=0.10,
     )
-
-    if not readings:
-        fig.add_annotation(text="Warming up — please wait...", showarrow=False,
+    if not rows:
+        fig.add_annotation(text="Warming up…", showarrow=False,
                            xref="paper", yref="paper", x=0.5, y=0.5)
-        _style_fig(fig)
-        return fig
+        _style(fig); return fig
 
-    df = pd.DataFrame(readings)
-    point_colors = df["status"].map({
-        "normal":  "#00c853",
-        "warning": "#ffab00",
-        "failure": "#ff5252",
-    }).fillna("#aaa")
+    df  = pd.DataFrame(rows)
+    pts = df["status"].map(
+        {"normal":"#00c853","warning":"#ffab00","failure":"#ff5252"}
+    ).fillna("#aaa")
 
-    def _add(col, row, line_color, warn, crit):
+    def _add(col, row, color, warn, crit):
         fig.add_trace(go.Scatter(
-            x=df["timestamp"], y=df[col],
-            mode="lines+markers",
-            line=dict(color=line_color, width=2),
-            marker=dict(color=point_colors, size=6),
-            showlegend=False,
+            x=df["timestamp"], y=df[col], mode="lines+markers",
+            line=dict(color=color, width=2),
+            marker=dict(color=pts, size=6), showlegend=False,
         ), row=row, col=1)
-        fig.add_hline(y=warn, line_dash="dot",  line_color="#ffab00", line_width=1, row=row, col=1)
-        fig.add_hline(y=crit, line_dash="dash", line_color="#ff5252", line_width=1, row=row, col=1)
+        fig.add_hline(y=warn, line_dash="dot",  line_color="#ffab00",
+                      line_width=1, row=row, col=1)
+        fig.add_hline(y=crit, line_dash="dash", line_color="#ff5252",
+                      line_width=1, row=row, col=1)
 
     _add("temperature", 1, "#ef5350",
          THRESHOLDS["temperature"]["warning"], THRESHOLDS["temperature"]["critical"])
@@ -133,256 +156,264 @@ def build_sensor_chart(machine_id: str) -> go.Figure:
          THRESHOLDS["vibration"]["warning"],   THRESHOLDS["vibration"]["critical"])
     _add("pressure",    3, "#42a5f5",
          THRESHOLDS["pressure"]["warning"],    THRESHOLDS["pressure"]["critical"])
-
-    _style_fig(fig)
-    return fig
+    _style(fig); return fig
 
 
-def build_fleet_bar(all_latest: dict) -> go.Figure:
-    """3 always-visible subplots — Temperature / Vibration / Pressure."""
-    machines, temps, vibs, pres, colors = [], [], [], [], []
-    for mid, r in all_latest.items():
+def fleet_chart(latest: dict) -> go.Figure:
+    mids, temps, vibs, pres, cols = [], [], [], [], []
+    for mid, r in latest.items():
         if r:
-            machines.append(mid)
+            mids.append(mid)
             temps.append(r["temperature"])
             vibs.append(r["vibration"])
             pres.append(r["pressure"])
-            colors.append(STATUS_COLOR.get(r["status"], "#aaa"))
+            cols.append(COLOR.get(r["status"], "#aaa"))
 
-    if not machines:
+    if not mids:
         fig = go.Figure()
-        fig.add_annotation(text="Warming up...", showarrow=False,
+        fig.add_annotation(text="Warming up…", showarrow=False,
                            xref="paper", yref="paper", x=0.5, y=0.5)
         return fig
 
     fig = make_subplots(
-        rows=1, cols=3,
+        rows=1, cols=3, horizontal_spacing=0.08,
         subplot_titles=("Temperature (°C)", "Vibration (mm/s)", "Pressure (bar)"),
-        horizontal_spacing=0.08,
     )
+    for ci, (data, lbl) in enumerate([(temps,"Temp"),(vibs,"Vib"),(pres,"Pres")], 1):
+        fig.add_trace(go.Bar(
+            x=mids, y=data, marker_color=cols, name=lbl,
+            text=[f"{v:.2f}" for v in data],
+            textposition="outside",
+            textfont=dict(size=11, color="#ccc"),
+            showlegend=False,
+        ), row=1, col=ci)
 
-    fig.add_trace(go.Bar(
-        x=machines, y=temps, marker_color=colors,
-        text=[f"{v:.1f}" for v in temps], textposition="outside",
-        textfont=dict(size=11, color="#ccc"), showlegend=False, name="Temp °C",
-    ), row=1, col=1)
+    thresholds = [(1, 72, 90), (2, 0.85, 1.80), (3, 36, 46)]
+    for ci, warn, crit in thresholds:
+        fig.add_hline(y=warn, line_dash="dot",  line_color="#ffab00",
+                      line_width=1, row=1, col=ci)
+        fig.add_hline(y=crit, line_dash="dash", line_color="#ff5252",
+                      line_width=1, row=1, col=ci)
 
-    fig.add_trace(go.Bar(
-        x=machines, y=vibs, marker_color=colors,
-        text=[f"{v:.3f}" for v in vibs], textposition="outside",
-        textfont=dict(size=11, color="#ccc"), showlegend=False, name="Vib mm/s",
-    ), row=1, col=2)
-
-    fig.add_trace(go.Bar(
-        x=machines, y=pres, marker_color=colors,
-        text=[f"{v:.1f}" for v in pres], textposition="outside",
-        textfont=dict(size=11, color="#ccc"), showlegend=False, name="Pres bar",
-    ), row=1, col=3)
-
-    fig.add_hline(y=72,   line_dash="dot",  line_color="#ffab00", line_width=1, row=1, col=1)
-    fig.add_hline(y=90,   line_dash="dash", line_color="#ff5252", line_width=1, row=1, col=1)
-    fig.add_hline(y=0.85, line_dash="dot",  line_color="#ffab00", line_width=1, row=1, col=2)
-    fig.add_hline(y=1.80, line_dash="dash", line_color="#ff5252", line_width=1, row=1, col=2)
-    fig.add_hline(y=36,   line_dash="dot",  line_color="#ffab00", line_width=1, row=1, col=3)
-    fig.add_hline(y=46,   line_dash="dash", line_color="#ff5252", line_width=1, row=1, col=3)
-
-    fig.update_layout(
-        height=280, paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
-        font=dict(color="#ccc", size=11), margin=dict(l=40, r=40, t=40, b=20),
-    )
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(gridcolor="#1e2130", showgrid=True)
+    _style(fig, h=260)
     return fig
 
 
-def _style_fig(fig):
-    fig.update_layout(
-        height=400, paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
-        font=dict(color="#ccc", size=11), margin=dict(l=50, r=20, t=40, b=20),
-    )
-    fig.update_xaxes(showgrid=False, tickangle=-30)
-    fig.update_yaxes(gridcolor="#1e2130")
+def _clean(text: str) -> str:
+    """Strip <thinking>...</thinking> blocks from LLM output."""
+    return re.sub(r"<thinking>.*?</thinking>", "", text,
+                  flags=re.DOTALL).strip()
 
 
-# ══════════════════════════════════════════════════════════
-#  Session state init
-# ══════════════════════════════════════════════════════════
-def _init():
-    defaults = {
-        "sim_started": False,
-        "auto_run":    False,
-        "last_auto":   0.0,
-        "selected":    "M1",
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-_init()
-
-# start simulator once
-if not st.session_state["sim_started"]:
-    simulator.start()
-    st.session_state["sim_started"] = True
-    time.sleep(2)
-
-
-# ══════════════════════════════════════════════════════════
-#  Agent runner — uses module-level store, NOT session_state
-# ══════════════════════════════════════════════════════════
-def _run_agent(machine_id: str):
-    """Spawn background thread. Result written to _results_store (thread-safe)."""
-    def _worker():
-        _agent_running.set()
-        try:
-            result = agent.run(machine_id)
-            _set_result(machine_id, result)
-        finally:
-            _agent_running.clear()
-
-    if not _agent_running.is_set():
-        threading.Thread(target=_worker, daemon=True).start()
-
-
-# ══════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 #  SIDEBAR
-# ══════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 with st.sidebar:
-    st.title("⚙️ Maintenance AI")
-    st.caption("Agentic Predictive Maintenance System")
+    st.title("⚙️ AI Maintenance")
+    st.caption("Real-time predictive maintenance powered by an AI agent.")
     st.divider()
 
-    selected = st.selectbox(
-        "Inspect machine",
-        MACHINES,
-        index=MACHINES.index(st.session_state["selected"]),
-    )
-    st.session_state["selected"] = selected
+    busy    = _running.is_set()
+    latest_ = simulator.get_all_latest()
+
+    # figure out which machines actually need attention right now
+    needs_attention = [
+        mid for mid in MACHINES
+        if latest_.get(mid) and latest_[mid]["status"] in ("warning", "failure")
+    ]
+
+    # ── LLM call counter ──────────────────────
+    est_all   = len(MACHINES) * 4
+    est_smart = len(needs_attention) * 4 if needs_attention else 0
+
+    st.markdown("#### 🔋 LLM Call Estimator")
+    col1, col2 = st.columns(2)
+    col1.metric("Run All",   f"~{est_all} calls")
+    col2.metric("Run Smart", f"~{est_smart} calls",
+                delta=f"-{est_all - est_smart}" if est_smart < est_all else "same")
     st.divider()
 
-    running = _agent_running.is_set()
-
-    if st.button(f"▶  Run Agent — {selected}", disabled=running, use_container_width=True):
-        _run_agent(selected)
-
-    if st.button("▶▶  Run Agent — All Machines", disabled=running, use_container_width=True):
-        for m in MACHINES:
-            _run_agent(m)
+    # ── Smart run (warning/failure only) ──────
+    if needs_attention:
+        if st.button("⚡  Run Smart — " + ", ".join(needs_attention),
+                     disabled=busy, use_container_width=True, type="primary"):
+            def _run_smart():
+                _running.set()
+                try:
+                    for mid in needs_attention:
+                        _save(mid, agent.run(mid))
+                finally:
+                    _running.clear()
+            threading.Thread(target=_run_smart, daemon=True).start()
+        st.caption(f"Only checks machines needing attention. "
+                   f"Saves ~{est_all - est_smart} LLM calls.")
+    else:
+        st.success("✅ All machines healthy — no urgent runs needed.")
 
     st.divider()
-    st.session_state["auto_run"] = st.toggle(
-        "Auto-run every 30 s", value=st.session_state["auto_run"]
-    )
 
-    if running:
-        st.info("🤖 Agent is thinking…")
+    # ── Run ALL machines ──────────────────────
+    if st.button("▶▶  Run Agent — ALL 5 Machines",
+                 disabled=busy, use_container_width=True):
+        _run_all()
+    st.caption(f"Uses ~{est_all} LLM calls total.")
 
     st.divider()
-    st.caption("Tick interval  : 5 sec")
-    st.caption("Buffer size    : 20 readings")
-    st.caption("LLM            : amazon.nova.lite")
+
+    # ── Run individual machine ────────────────
+    st.markdown("**Run one machine at a time:**")
+    for mid in MACHINES:
+        r      = latest_.get(mid)
+        status = r["status"] if r else "unknown"
+        emoji  = {"normal":"🟢","warning":"🟡","failure":"🔴",
+                  "recovering":"🔵"}.get(status, "⚪")
+        est    = 3 if status == "normal" else 4
+        if st.button(f"{emoji}  {mid} — {status.upper()}  (~{est} calls)",
+                     key=f"btn_{mid}", disabled=busy,
+                     use_container_width=True):
+            _run_one(mid)
+
+    st.divider()
+
+    if busy:
+        st.warning("🤖 Agent is running… please wait.")
+    else:
+        st.info("💡 Use Run Smart to save API calls.")
+
+    st.divider()
+    st.markdown("**Legend:**")
+    st.markdown("🟢 Normal  🟡 Warning  🔴 Failure  🔵 Recovering")
+    st.markdown("Dotted line = warning threshold")
+    st.markdown("Dashed line = critical threshold")
 
 
-# ══════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 #  MAIN DASHBOARD
-# ══════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 st.title("⚙️ Predictive Maintenance — Live Dashboard")
 
-# ── Fleet health cards ────────────────────────────────────
-st.subheader("Fleet Status")
-all_latest = simulator.get_all_latest()
-cols = st.columns(5)
+# ── SECTION 1: Fleet status cards ────────────────────────
+st.subheader("🏭  Fleet Status  —  All Machines")
+st.caption("Updates every 5 seconds automatically.")
 
+latest = simulator.get_all_latest()
+fleet_cols = st.columns(5)
 for i, mid in enumerate(MACHINES):
-    r = all_latest.get(mid)
-    with cols[i]:
+    r = latest.get(mid)
+    with fleet_cols[i]:
         if r:
-            c = STATUS_COLOR.get(r["status"], "#aaa")
+            c = COLOR.get(r["status"], "#aaa")
+            has_result = _load(mid) is not None
+            badge = "✅ Checked" if has_result else "⏳ Not checked"
             st.markdown(f"""
-            <div class="metric-card">
-                <div style="font-size:20px;font-weight:700">{mid}</div>
-                <div style="color:{c};font-size:13px;margin:4px 0 8px">{r['status'].upper()}</div>
-                <div style="font-size:12px;color:#bbb">🌡 {r['temperature']} °C</div>
-                <div style="font-size:12px;color:#bbb">〰 {r['vibration']} mm/s</div>
-                <div style="font-size:12px;color:#bbb">⬡ {r['pressure']} bar</div>
+            <div class="card">
+              <div class="card-name">{mid}</div>
+              <div class="card-status" style="color:{c}">{r['status'].upper()}</div>
+              <div class="card-val">
+                🌡 {r['temperature']} °C<br>
+                〰 {r['vibration']} mm/s<br>
+                ⬡ {r['pressure']} bar<br>
+                <span style="color:#666;font-size:11px">{badge}</span>
+              </div>
             </div>""", unsafe_allow_html=True)
         else:
             st.markdown(f"""
-            <div class="metric-card">
-                <div style="font-size:20px;font-weight:700">{mid}</div>
-                <div style="color:#888;font-size:13px;margin-top:8px">Warming up…</div>
+            <div class="card">
+              <div class="card-name">{mid}</div>
+              <div style="color:#555;font-size:12px;margin-top:12px">Starting…</div>
             </div>""", unsafe_allow_html=True)
 
 st.divider()
 
-# ── Fleet bar chart ───────────────────────────────────────
-st.subheader("Fleet Sensor Overview")
-st.plotly_chart(build_fleet_bar(all_latest), width="stretch")
+# ── SECTION 2: Fleet sensor overview ─────────────────────
+st.subheader("📊  Fleet Sensor Overview")
+st.caption("All 5 machines compared. Dotted = warning.  Dashed = critical.")
+st.plotly_chart(fleet_chart(latest), use_container_width=True)
 
 st.divider()
 
-# ── Live sensor chart + agent thought panel ───────────────
-left, right = st.columns([3, 2])
+# ── SECTION 3: Per-machine tabs ───────────────────────────
+st.subheader("📈  Machine Detail — Live Sensors & Agent Report")
+st.caption("Click a tab to view any machine. Run the agent first to see the report.")
 
-with left:
-    st.subheader(f"Live Sensors — {selected}")
-    st.plotly_chart(
-        build_sensor_chart(selected),
-        width="stretch",
-        key=f"chart_{selected}_{int(time.time()//5)}",
-    )
+tabs = st.tabs([f"  {m}  " for m in MACHINES])
 
-with right:
-    st.subheader("Agent Reasoning")
-    result = _get_result(selected)
-    if not result:
-        st.info("Run the agent to see its step-by-step reasoning here.")
-    else:
-        for step in result.get("thought_steps", []):
-            t = step.get("type")
-            if t == "action":
-                st.markdown(
-                    f'<div class="step-action"><b>ACTION</b> → '
-                    f'<code>{step["tool"]}</code><br>'
-                    f'<span style="color:#aaa">Input: {step["input"][:120]}</span></div>',
-                    unsafe_allow_html=True,
-                )
-            elif t == "observation":
-                preview = step["output"][:300].replace("\n", "<br>")
-                st.markdown(
-                    f'<div class="step-obs"><b>OBSERVATION</b><br>{preview}</div>',
-                    unsafe_allow_html=True,
-                )
-            elif t == "final":
-                st.markdown(
-                    f'<div class="step-final"><b>FINAL DECISION</b><br>'
-                    f'{step["output"][:400]}</div>',
-                    unsafe_allow_html=True,
-                )
+for i, mid in enumerate(MACHINES):
+    with tabs[i]:
+        r_live = latest.get(mid)
+
+        # live status pill
+        if r_live:
+            c = COLOR.get(r_live["status"], "#aaa")
+            st.markdown(
+                f'<span style="background:{c}22;color:{c};padding:4px 12px;'
+                f'border-radius:20px;font-size:13px;font-weight:600;border:1px solid {c}">'
+                f'{r_live["status"].upper()}</span>&nbsp;&nbsp;'
+                f'<span style="color:#888;font-size:12px">'
+                f'Temp: {r_live["temperature"]}°C  |  '
+                f'Vib: {r_live["vibration"]} mm/s  |  '
+                f'Pres: {r_live["pressure"]} bar</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("")
+
+        # live sensor chart
+        st.plotly_chart(
+            sensor_chart(mid),
+            use_container_width=True,
+            key=f"sc_{mid}_{int(time.time()//5)}",
+        )
+
+        # agent report for this machine
+        result = _load(mid)
+        if not result:
+            st.info(f"No agent report yet for {mid}. "
+                    f"Click **▶  {mid}** in the sidebar or **Run All**.")
+        else:
+            report = _clean(result.get("final_report", ""))
+            st.markdown(
+                f'<div class="report">{report.replace(chr(10), "<br>")}</div>',
+                unsafe_allow_html=True,
+            )
+
+            steps = result.get("thought_steps", [])
+            if steps:
+                with st.expander("🔍  See agent reasoning step by step"):
+                    for step in steps:
+                        t = step.get("type")
+                        if t == "action":
+                            st.markdown(
+                                f'<div class="box-tool">'
+                                f'<b>TOOL CALLED:</b> <code>{step["tool"]}</code><br>'
+                                f'<span style="color:#aaa">Input: '
+                                f'{str(step["input"])[:150]}</span></div>',
+                                unsafe_allow_html=True)
+                        elif t == "observation":
+                            prev = step["output"][:400].replace("\n", "<br>")
+                            st.markdown(
+                                f'<div class="box-obs"><b>TOOL RESULT:</b>'
+                                f'<br>{prev}</div>',
+                                unsafe_allow_html=True)
+                        elif t == "final":
+                            cf = _clean(step.get("output",""))[:400]
+                            st.markdown(
+                                f'<div class="box-final"><b>DECISION:</b>'
+                                f'<br>{cf}</div>',
+                                unsafe_allow_html=True)
 
 st.divider()
 
-# ── Agent report ──────────────────────────────────────────
-st.subheader(f"Maintenance Report — {selected}")
-result = _get_result(selected)
-if result and result.get("final_report"):
-    st.markdown(
-        f'<div class="report-box">'
-        f'{result["final_report"].replace(chr(10), "<br>")}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-else:
-    st.info("No report yet. Click 'Run Agent' to generate one.")
+# ── SECTION 4: Action history ─────────────────────────────
+st.subheader("📋  Action History — All Machines")
+st.caption("Every action the agent has taken this session.")
 
-st.divider()
-
-# ── Action log ────────────────────────────────────────────
-st.subheader("Action History")
 log = agent.memory.get_log(n=30)
 if log:
-    df_log = pd.DataFrame(log)[["timestamp", "machine_id", "action", "detail"]]
+    df_log = pd.DataFrame(log)[["timestamp","machine_id","action","detail"]]
     df_log.columns = ["Time", "Machine", "Action", "Detail"]
+    df_log["Detail"] = df_log["Detail"].str.replace(
+        r"<thinking>.*?</thinking>", "", regex=True).str.strip()
+    df_log["Detail"] = df_log["Detail"].str[:120]
 
     def _row_color(row):
         if row["Action"] == "alert_sent":
@@ -393,30 +424,18 @@ if log:
 
     st.dataframe(
         df_log.style.apply(_row_color, axis=1),
-        width="stretch",
-        height=240,
+        use_container_width=True, height=220,
     )
+
+    s = agent.memory.summary()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total agent runs",    s["total"])
+    c2.metric("Alerts fired",        s["alerts"])
+    c3.metric("Jobs scheduled",      s["jobs"])
+    c4.metric("Machines checked",    s["machines"])
 else:
-    st.info("No actions logged yet.")
+    st.info("No actions yet. Run the agent to see results here.")
 
-st.divider()
-
-# ── Session summary KPIs ──────────────────────────────────
-st.subheader("Session Summary")
-s = agent.memory.summary()
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total agent runs",   s["total"])
-c2.metric("Alerts fired",       s["alerts"])
-c3.metric("Jobs scheduled",     s["jobs"])
-c4.metric("Machines monitored", s["machines"])
-
-# ── Auto-run logic ────────────────────────────────────────
-if st.session_state["auto_run"]:
-    now = time.time()
-    if now - st.session_state["last_auto"] > AGENT_CHECK_INTERVAL:
-        st.session_state["last_auto"] = now
-        _run_agent(selected)
-
-# refresh every 5 seconds to show updated sensor data
+# ── auto-refresh every 5 seconds ──────────────────────────
 time.sleep(5)
 st.rerun()
