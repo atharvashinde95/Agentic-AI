@@ -1,27 +1,30 @@
-# ──────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 #  requirements.txt  —  LangChain Predictive Maintenance Agent
 #
-#  Install:  pip install -r requirements.txt
+#  Install with:  pip install -r requirements.txt
 #
-#  Version notes
-#  ─────────────
-#  • langchain>=0.3.1  — ConversationBufferWindowMemory deprecated here;
-#                        we do NOT use it (manual deque instead).
-#  • langchain-core    — PromptTemplate, BaseChatModel, @tool live here.
-#  • langchain-community — may be needed by some LangChain internals.
-#  • No langgraph required — we use AgentExecutor, not LangGraph.
-# ──────────────────────────────────────────────────────────────────────────
+#  WHY THESE PINS?
+#  ───────────────
+#  langchain 1.0+ removed AgentExecutor from langchain.agents entirely.
+#  We pin to the 0.3.x series which has:
+#    ✅  langchain.agents.AgentExecutor          (stable)
+#    ✅  langchain.agents.create_react_agent     (stable)
+#    ✅  langchain_core.tools.tool               (stable @tool decorator)
+#    ✅  langchain_core.language_models          (BaseChatModel)
+#    ✅  langchain_core.prompts.PromptTemplate   (stable)
+#    ❌  ConversationBufferWindowMemory          (NOT used — manual deque)
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── LangChain core stack ────────────────────────────────────────────────
-langchain>=0.3.1
-langchain-core>=0.3.0
-langchain-community>=0.3.0
+# ── LangChain — pinned to 0.3.x series ──────────────────────────────────────
+langchain>=0.3.1,<1.0.0
+langchain-core>=0.3.0,<1.0.0
+langchain-community>=0.3.0,<1.0.0
 
-# ── UI & visualisation ──────────────────────────────────────────────────
+# ── UI & visualisation ───────────────────────────────────────────────────────
 streamlit>=1.35.0
 plotly>=5.20.0
 pandas>=2.0.0
 
-# ── HTTP & environment ──────────────────────────────────────────────────
+# ── HTTP & environment ───────────────────────────────────────────────────────
 requests>=2.31.0
 python-dotenv>=1.0.0
