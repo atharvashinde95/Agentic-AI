@@ -1,18 +1,27 @@
-# ─────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────
 #  requirements.txt  —  LangChain Predictive Maintenance Agent
-#  Install: pip install -r requirements.txt
-# ─────────────────────────────────────────────────────────────────
+#
+#  Install:  pip install -r requirements.txt
+#
+#  Version notes
+#  ─────────────
+#  • langchain>=0.3.1  — ConversationBufferWindowMemory deprecated here;
+#                        we do NOT use it (manual deque instead).
+#  • langchain-core    — PromptTemplate, BaseChatModel, @tool live here.
+#  • langchain-community — may be needed by some LangChain internals.
+#  • No langgraph required — we use AgentExecutor, not LangGraph.
+# ──────────────────────────────────────────────────────────────────────────
 
-# ── Core LangChain ──────────────────────────────────────────────
-langchain>=0.2.0
-langchain-core>=0.2.0
-langchain-community>=0.2.0
+# ── LangChain core stack ────────────────────────────────────────────────
+langchain>=0.3.1
+langchain-core>=0.3.0
+langchain-community>=0.3.0
 
-# ── UI & Visualisation ──────────────────────────────────────────
+# ── UI & visualisation ──────────────────────────────────────────────────
 streamlit>=1.35.0
 plotly>=5.20.0
 pandas>=2.0.0
 
-# ── HTTP & Environment ──────────────────────────────────────────
+# ── HTTP & environment ──────────────────────────────────────────────────
 requests>=2.31.0
 python-dotenv>=1.0.0
