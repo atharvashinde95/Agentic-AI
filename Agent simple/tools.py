@@ -1,30 +1,30 @@
 """
 tools.py
 --------
-LangChain tool definitions for the Predictive Maintenance Agent.
+LangChain 1.0 tool definitions for the Predictive Maintenance Agent.
 
-Each function is decorated with @tool so LangChain's ReAct agent
-can discover, select, and invoke them autonomously based on the
-agent's reasoning about the current sensor state.
+Each function is decorated with @tool from langchain.tools (stable in 1.0).
+The create_agent() runtime discovers, selects, and invokes these tools
+autonomously via tool-calling — the LLM decides which to call and when.
 
 Tools:
-  1. check_sensor_status   — Threshold monitor (perception)
-  2. diagnose_condition     — Rule-based fault classifier
-  3. send_alert             — Issue a warning notification
-  4. schedule_maintenance   — Book a maintenance job
-  5. log_normal_cycle       — Record a normal (healthy) reading
-  6. get_trend_analysis     — Summarise recent sensor trends from memory
+  1. check_sensor_status    — threshold monitor (perception layer)
+  2. diagnose_condition     — rule-based fault classifier
+  3. send_alert             — issue a warning notification
+  4. schedule_maintenance   — schedule a maintenance job
+  5. log_normal_cycle       — record a healthy reading
+  6. get_trend_analysis     — summarise sensor trends from memory
 """
 
 import json
 import datetime
-import memory_store as mem
 
-from langchain.tools import tool
+import memory_store as mem
+from langchain.tools import tool    # stable in LangChain 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-#  Sensor thresholds (single source of truth)
+#  Thresholds — single source of truth shared by all tools
 # ─────────────────────────────────────────────────────────────────────────── #
 
 THRESHOLDS = {
@@ -42,38 +42,37 @@ THRESHOLDS = {
 def check_sensor_status(sensor_json: str) -> str:
     """
     Evaluate raw sensor readings against known thresholds and return
-    the severity level (normal / warning / critical) for each sensor.
+    the severity level for each sensor (normal / warning / critical).
 
-    Input:  JSON string with keys temperature (°C), vibration (mm/s),
-            pressure (bar), tick (int).
-    Output: JSON string mapping each sensor name to its severity level
-            plus a brief human-readable summary.
+    Input  : JSON string with keys: temperature (float, °C),
+             vibration (float, mm/s), pressure (float, bar), tick (int).
+    Output : JSON string with sensor_status dict and a plain-text summary.
 
-    Use this tool FIRST in every cycle to understand the current machine state.
+    Call this tool FIRST every cycle to understand the machine state.
+    Example input: '{"temperature": 92.5, "vibration": 3.1, "pressure": 4.8, "tick": 5}'
     """
     try:
         data = json.loads(sensor_json)
     except json.JSONDecodeError:
-        return json.dumps({"error": "Invalid JSON input"})
+        return json.dumps({"error": "Invalid JSON — check your input format."})
 
     status = {}
-    for sensor, thresholds in THRESHOLDS.items():
-        value = data.get(sensor, 0.0)
-        if value >= thresholds["critical"]:
+    for sensor, thr in THRESHOLDS.items():
+        val = float(data.get(sensor, 0.0))
+        if val >= thr["critical"]:
             status[sensor] = "critical"
-        elif value >= thresholds["warning"]:
+        elif val >= thr["warning"]:
             status[sensor] = "warning"
         else:
             status[sensor] = "normal"
 
-    # Build a human-readable summary line
-    critical_sensors = [s for s, v in status.items() if v == "critical"]
-    warning_sensors  = [s for s, v in status.items() if v == "warning"]
+    critical = [s for s, v in status.items() if v == "critical"]
+    warning  = [s for s, v in status.items() if v == "warning"]
 
-    if critical_sensors:
-        summary = f"CRITICAL condition detected on: {', '.join(critical_sensors)}"
-    elif warning_sensors:
-        summary = f"WARNING condition detected on: {', '.join(warning_sensors)}"
+    if critical:
+        summary = f"CRITICAL condition on: {', '.join(critical)}"
+    elif warning:
+        summary = f"WARNING condition on: {', '.join(warning)}"
     else:
         summary = "All sensors within normal operating range."
 
@@ -91,23 +90,23 @@ def check_sensor_status(sensor_json: str) -> str:
 @tool
 def diagnose_condition(status_json: str) -> str:
     """
-    Apply rule-based fault logic to translate sensor severity levels into
-    named fault conditions and a recommended action.
+    Apply rule-based fault logic to translate severity levels into named
+    fault conditions and a recommended action.
 
-    Input:  JSON string with a 'sensor_status' dict (output from
-            check_sensor_status) and a 'tick' int.
-    Output: JSON string with 'faults' (list), 'recommended_action'
-            (Continue / Alert / Maintenance), and 'risk_level'
-            (Low / Medium / High).
+    Input  : JSON string with a 'sensor_status' dict (output of
+             check_sensor_status) and optionally a 'tick' int.
+    Output : JSON string with fields: faults (list of strings),
+             recommended_action (Continue / Alert / Maintenance),
+             risk_level (Low / Medium / High).
 
-    Use this tool AFTER check_sensor_status to determine what is wrong
-    and what action the agent should take next.
+    Call this tool AFTER check_sensor_status to know what to do next.
+    Example input: '{"sensor_status": {"temperature": "warning", "vibration": "normal", "pressure": "normal"}}'
     """
     try:
         data   = json.loads(status_json)
         status = data.get("sensor_status", {})
     except json.JSONDecodeError:
-        return json.dumps({"error": "Invalid JSON input"})
+        return json.dumps({"error": "Invalid JSON — provide sensor_status dict."})
 
     faults = []
 
@@ -115,13 +114,13 @@ def diagnose_condition(status_json: str) -> str:
     if status.get("temperature") == "critical":
         faults.append("Severe Overheating — immediate shutdown risk")
     elif status.get("temperature") == "warning":
-        faults.append("Overheating — cooling system check required")
+        faults.append("Overheating — cooling system inspection required")
 
     # Vibration rules
     if status.get("vibration") == "critical":
         faults.append("Severe Mechanical Imbalance / Bearing Failure")
     elif status.get("vibration") == "warning":
-        faults.append("Mechanical Imbalance — inspect rotating parts")
+        faults.append("Mechanical Imbalance — inspect rotating components")
 
     # Pressure rules
     if status.get("pressure") == "critical":
@@ -130,29 +129,25 @@ def diagnose_condition(status_json: str) -> str:
         faults.append("Elevated Pressure — check relief valve")
 
     # Decision logic
-    critical_count = sum(1 for v in status.values() if v == "critical")
-    warning_count  = sum(1 for v in status.values() if v == "warning")
+    n_critical = sum(1 for v in status.values() if v == "critical")
+    n_warning  = sum(1 for v in status.values() if v == "warning")
 
-    if critical_count >= 1:
-        action = "Maintenance"
-        risk   = "High"
-    elif warning_count >= 2:
-        action = "Maintenance"
-        risk   = "High"
-    elif warning_count == 1:
-        action = "Alert"
-        risk   = "Medium"
+    if n_critical >= 1:
+        action, risk = "Maintenance", "High"
+    elif n_warning >= 2:
+        action, risk = "Maintenance", "High"
+    elif n_warning == 1:
+        action, risk = "Alert", "Medium"
     else:
-        action = "Continue"
-        risk   = "Low"
+        action, risk = "Continue", "Low"
         faults = ["No faults detected — machine operating normally"]
 
     return json.dumps({
         "faults"              : faults,
         "recommended_action"  : action,
         "risk_level"          : risk,
-        "critical_sensor_count": critical_count,
-        "warning_sensor_count" : warning_count,
+        "critical_sensor_count": n_critical,
+        "warning_sensor_count" : n_warning,
     })
 
 
@@ -164,44 +159,38 @@ def diagnose_condition(status_json: str) -> str:
 def send_alert(alert_json: str) -> str:
     """
     Issue a maintenance alert when a sensor has entered the WARNING range.
-    Records the alert to the event log.
+    Records the event to the shared event log.
 
-    Input:  JSON string with keys:
-              sensor   — which sensor triggered (e.g. "temperature")
-              value    — current sensor reading
-              risk     — risk level string ("Medium" or "High")
-              faults   — list of fault description strings
-              tick     — current simulation tick
-    Output: JSON string confirming the alert was raised, with a
-            human-readable message and a timestamp.
+    Input  : JSON string with keys: sensor (str), value (float),
+             risk (str), faults (list of str), tick (int).
+    Output : JSON string confirming the alert, with a message and timestamp.
 
-    Use this tool when recommended_action is "Alert".
+    Call this tool when recommended_action from diagnose_condition is "Alert".
+    Example input: '{"sensor": "temperature", "value": 88.5, "risk": "Medium", "faults": ["Overheating"], "tick": 7}'
     """
     try:
         data = json.loads(alert_json)
     except json.JSONDecodeError:
-        return json.dumps({"error": "Invalid JSON input"})
+        return json.dumps({"error": "Invalid JSON input."})
 
-    sensor  = data.get("sensor",  "unknown")
-    value   = data.get("value",   0.0)
-    risk    = data.get("risk",    "Medium")
-    faults  = data.get("faults",  [])
-    tick    = data.get("tick",    -1)
+    sensor = data.get("sensor",  "unknown")
+    value  = data.get("value",   0.0)
+    risk   = data.get("risk",    "Medium")
+    faults = data.get("faults",  [])
+    tick   = data.get("tick",    -1)
 
     threshold = THRESHOLDS.get(sensor, {}).get("warning", "N/A")
     ts        = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    message = (
-        f"⚠️ ALERT [{risk} Risk] | {sensor.upper()} = {value} "
+    message   = (
+        f"⚠️  ALERT [{risk} Risk] | {sensor.upper()} = {value} "
         f"(warning threshold: {threshold}) | {ts}"
     )
 
-    # Write to event log and file
     mem.log_event(
         status="Warning", action="Alert", risk=risk,
         tool="send_alert", message=message, tick=tick,
     )
-    _write_log_file("ALERT", message)
+    _write_log("ALERT", message)
 
     return json.dumps({
         "tool"     : "send_alert",
@@ -223,32 +212,28 @@ def send_alert(alert_json: str) -> str:
 @tool
 def schedule_maintenance(maintenance_json: str) -> str:
     """
-    Schedule a maintenance job for the machine when a critical or multi-warning
-    condition is detected.
+    Schedule a maintenance job when a critical or multi-warning condition
+    is detected. Records the job to the shared event log.
 
-    Input:  JSON string with keys:
-              reason  — human-readable reason for maintenance
-              urgency — "Immediate" or "Scheduled"
-              sensor  — primary sensor that triggered this decision
-              tick    — current simulation tick
-    Output: JSON string with a unique maintenance ID, confirmation message,
-            and timestamp.
+    Input  : JSON string with keys: reason (str), urgency (str:
+             Immediate or Scheduled), sensor (str), tick (int).
+    Output : JSON string with a unique maintenance ID and confirmation.
 
-    Use this tool when recommended_action is "Maintenance".
+    Call this tool when recommended_action from diagnose_condition is "Maintenance".
+    Example input: '{"reason": "Severe Overheating", "urgency": "Immediate", "sensor": "temperature", "tick": 12}'
     """
     try:
         data = json.loads(maintenance_json)
     except json.JSONDecodeError:
-        return json.dumps({"error": "Invalid JSON input"})
+        return json.dumps({"error": "Invalid JSON input."})
 
     reason  = data.get("reason",  "Sensor anomaly detected")
     urgency = data.get("urgency", "Scheduled")
     sensor  = data.get("sensor",  "unknown")
     tick    = data.get("tick",    -1)
 
-    ts    = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts     = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     mnt_id = f"MNT-{datetime.datetime.now().strftime('%H%M%S')}"
-
     message = (
         f"🔧 MAINTENANCE [{urgency}] | ID: {mnt_id} | "
         f"Reason: {reason} | Sensor: {sensor.upper()} | {ts}"
@@ -258,7 +243,7 @@ def schedule_maintenance(maintenance_json: str) -> str:
         status="Failure", action="Maintenance", risk="High",
         tool="schedule_maintenance", message=message, tick=tick,
     )
-    _write_log_file("MAINTENANCE", message)
+    _write_log("MAINTENANCE", message)
 
     return json.dumps({
         "tool"          : "schedule_maintenance",
@@ -278,35 +263,37 @@ def schedule_maintenance(maintenance_json: str) -> str:
 @tool
 def log_normal_cycle(cycle_json: str) -> str:
     """
-    Record a healthy / normal sensor cycle to the audit log.
-    No alert or maintenance action is needed.
+    Record a healthy sensor cycle to the audit log when all readings
+    are within normal operating limits and no action is required.
 
-    Input:  JSON string with keys temperature, vibration, pressure, tick.
-    Output: JSON string confirming the log entry was written.
+    Input  : JSON string with keys: temperature (float), vibration (float),
+             pressure (float), tick (int).
+    Output : JSON string confirming the log entry was written.
 
-    Use this tool when recommended_action is "Continue".
+    Call this tool when recommended_action from diagnose_condition is "Continue".
+    Example input: '{"temperature": 70.2, "vibration": 2.8, "pressure": 4.6, "tick": 3}'
     """
     try:
         data = json.loads(cycle_json)
     except json.JSONDecodeError:
-        return json.dumps({"error": "Invalid JSON input"})
+        return json.dumps({"error": "Invalid JSON input."})
 
-    temp  = data.get("temperature", 0.0)
-    vib   = data.get("vibration",   0.0)
-    pres  = data.get("pressure",    0.0)
-    tick  = data.get("tick",        -1)
-    ts    = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    temp = data.get("temperature", 0.0)
+    vib  = data.get("vibration",   0.0)
+    pres = data.get("pressure",    0.0)
+    tick = data.get("tick",        -1)
+    ts   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     detail = (
         f"T={temp}°C  V={vib}mm/s  P={pres}bar | "
-        f"All Normal | tick={tick} | {ts}"
+        f"Status: Normal | tick={tick} | {ts}"
     )
 
     mem.log_event(
         status="Normal", action="Continue", risk="Low",
         tool="log_normal_cycle", message=detail, tick=tick,
     )
-    _write_log_file("NORMAL", detail)
+    _write_log("NORMAL", detail)
 
     return json.dumps({
         "tool"     : "log_normal_cycle",
@@ -321,35 +308,49 @@ def log_normal_cycle(cycle_json: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────── #
 
 @tool
-def get_trend_analysis(dummy_input: str = "") -> str:
+def get_trend_analysis(dummy: str = "") -> str:
     """
-    Retrieve a trend summary (rising / stable / falling) and rolling
-    averages for all three sensors from the agent's memory window
-    (last 10 readings).
+    Retrieve trend direction (rising / stable / falling) and rolling
+    averages for all three sensors from the last 10 readings in memory.
 
-    Input:  Any string (ignored) — call this with an empty string "".
-    Output: JSON string with per-sensor trend direction and average value.
+    Input  : Any string (ignored). Pass an empty string "".
+    Output : JSON string with per-sensor trend direction and average value,
+             or a message if there is insufficient history.
 
-    Use this tool when you need context about whether sensor values are
-    trending toward danger, or to provide a richer explanation to the user.
+    Use this tool for borderline cases or when you want richer context
+    about whether sensors are trending toward a dangerous threshold.
     """
     trends = mem.compute_trends()
     if not trends:
-        return json.dumps({"message": "Insufficient history for trend analysis (need ≥2 readings)"})
-
+        return json.dumps({
+            "message": "Not enough history yet (need at least 2 readings)."
+        })
     return json.dumps({"trends": trends})
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-#  Internal helper
+#  Internal file logger
 # ─────────────────────────────────────────────────────────────────────────── #
 
-def _write_log_file(event: str, details: str, log_file: str = "agent_log.txt"):
-    """Append one line to the persistent log file on disk."""
-    ts       = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{ts}] [{event}] {details}\n"
+def _write_log(event: str, details: str, log_file: str = "agent_log.txt"):
+    """Append one line to the on-disk audit log."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         with open(log_file, "a") as f:
-            f.write(log_line)
-    except Exception as e:
-        pass  # Non-fatal — UI log is still updated via memory_store
+            f.write(f"[{ts}] [{event}] {details}\n")
+    except Exception:
+        pass   # non-fatal — in-memory log still works
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  Exported list — used by agent.py
+# ─────────────────────────────────────────────────────────────────────────── #
+
+ALL_TOOLS = [
+    check_sensor_status,
+    diagnose_condition,
+    send_alert,
+    schedule_maintenance,
+    log_normal_cycle,
+    get_trend_analysis,
+]
