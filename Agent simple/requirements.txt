@@ -1,24 +1,27 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#  requirements.txt  —  LangChain Predictive Maintenance Agent
+#  requirements.txt  —  LangChain Predictive Maintenance Agent (LC 1.0)
 #
-#  Install with:  pip install -r requirements.txt
+#  Install:  pip install -r requirements.txt
 #
-#  WHY THESE PINS?
-#  ───────────────
-#  langchain 1.0+ removed AgentExecutor from langchain.agents entirely.
-#  We pin to the 0.3.x series which has:
-#    ✅  langchain.agents.AgentExecutor          (stable)
-#    ✅  langchain.agents.create_react_agent     (stable)
-#    ✅  langchain_core.tools.tool               (stable @tool decorator)
-#    ✅  langchain_core.language_models          (BaseChatModel)
-#    ✅  langchain_core.prompts.PromptTemplate   (stable)
-#    ❌  ConversationBufferWindowMemory          (NOT used — manual deque)
+#  LangChain 1.0 API used
+#  ──────────────────────
+#  from langchain.agents      import create_agent   ✅  (NEW in 1.0)
+#  from langchain.tools       import tool           ✅  (stable)
+#  from langchain_core.*      import BaseChatModel, messages, etc.
+#  langgraph                  — runtime used by create_agent internally
+#
+#  What was REMOVED in 1.0 (we do NOT use these)
+#  ──────────────────────────────────────────────
+#  ❌  AgentExecutor            (gone from langchain.agents)
+#  ❌  create_react_agent       (gone from langchain.agents → langchain_classic)
+#  ❌  ConversationBufferMemory (deprecated since 0.3.1)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── LangChain — pinned to 0.3.x series ──────────────────────────────────────
-langchain>=0.3.1,<1.0.0
-langchain-core>=0.3.0,<1.0.0
-langchain-community>=0.3.0,<1.0.0
+# ── LangChain 1.0 ────────────────────────────────────────────────────────────
+langchain>=1.0.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langgraph>=0.3.0          # runtime used by create_agent under the hood
 
 # ── UI & visualisation ───────────────────────────────────────────────────────
 streamlit>=1.35.0
