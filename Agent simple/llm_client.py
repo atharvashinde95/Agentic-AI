@@ -1,14 +1,14 @@
 """
 llm_client.py
 -------------
-LangChain-compatible LLM wrapper for the Capgemini Generative Engine API
+LangChain 1.0-compatible LLM wrapper for the Capgemini Generative Engine API
 (model: amazon.nova.lite-v1.0).
 
 Implements langchain_core.language_models.chat_models.BaseChatModel so it
-slots directly into create_react_agent / AgentExecutor on langchain 0.3.x.
+works with langchain 1.0's create_agent() which requires a BaseChatModel.
 
 Only langchain_core is imported here — that package is stable across all
-0.3.x versions and has no deprecations.
+LangChain versions (0.3.x and 1.0+).
 """
 
 import os
@@ -18,13 +18,13 @@ from typing import Any, List, Optional
 
 from dotenv import load_dotenv
 
-# langchain_core is stable on 0.3.x — safe to import
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     BaseMessage,
     AIMessage,
     HumanMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langchain_core.outputs import ChatResult, ChatGeneration
 
@@ -37,10 +37,10 @@ MODEL_ID     = "amazon.nova.lite-v1.0"
 
 class CapgeminiNovaLite(BaseChatModel):
     """
-    Custom LangChain ChatModel wrapping the Capgemini REST API.
+    Custom LangChain 1.0 BaseChatModel for the Capgemini REST API.
 
-    Works with langchain 0.3.x AgentExecutor + create_react_agent.
-    No third-party LangChain integration packages required.
+    Accepted by create_agent() in langchain 1.0 because it is a BaseChatModel.
+    No third-party integration package required.
     """
 
     model_name : str   = MODEL_ID
@@ -55,12 +55,14 @@ class CapgeminiNovaLite(BaseChatModel):
     def _identifying_params(self) -> dict:
         return {"model_name": self.model_name, "max_tokens": self.max_tokens}
 
-    # ── Message conversion ─────────────────────────────────────────────── #
+    # ── Message → payload ─────────────────────────────────────────────── #
 
     def _build_payload(self, messages: List[BaseMessage]) -> dict:
         """
-        Convert LangChain messages → Capgemini / Anthropic REST payload.
-        System messages are extracted and sent as a top-level "system" key.
+        Convert LangChain message objects to the REST API payload format.
+        System messages are extracted and sent as a top-level 'system' key.
+        ToolMessages (tool call results) are mapped to 'user' role with a
+        clear prefix so the model understands their context.
         """
         system_content = None
         formatted      = []
@@ -69,11 +71,16 @@ class CapgeminiNovaLite(BaseChatModel):
             if isinstance(msg, SystemMessage):
                 system_content = msg.content
             elif isinstance(msg, HumanMessage):
-                formatted.append({"role": "user",      "content": msg.content})
+                formatted.append({"role": "user",      "content": str(msg.content)})
             elif isinstance(msg, AIMessage):
-                formatted.append({"role": "assistant", "content": msg.content})
+                formatted.append({"role": "assistant", "content": str(msg.content)})
+            elif isinstance(msg, ToolMessage):
+                # Tool results come back as ToolMessage in langchain 1.0
+                formatted.append({
+                    "role"   : "user",
+                    "content": f"[Tool result for {msg.tool_call_id}]: {msg.content}",
+                })
             else:
-                # Fallback for any other message type
                 formatted.append({"role": "user", "content": str(msg.content)})
 
         payload: dict = {
@@ -87,19 +94,14 @@ class CapgeminiNovaLite(BaseChatModel):
         return payload
 
     def _extract_text(self, data: dict) -> str:
-        """
-        Pull the text response out of the API JSON.
-        Handles both Anthropic-style (content[]) and OpenAI-style (choices[]).
-        """
+        """Pull text from API response — handles Anthropic and OpenAI formats."""
         if "content" in data:
             content = data["content"]
             if isinstance(content, list) and content:
                 return content[0].get("text", str(content[0]))
             return str(content)
-
         if "choices" in data:
             return data["choices"][0]["message"]["content"]
-
         return json.dumps(data)
 
     # ── Core generate ──────────────────────────────────────────────────── #
@@ -112,23 +114,16 @@ class CapgeminiNovaLite(BaseChatModel):
     ) -> ChatResult:
         """Called by LangChain on every LLM invocation."""
 
-        # ── Graceful no-credentials fallback ──────────────────────── #
         if not API_KEY or not API_ENDPOINT:
+            # Graceful no-credentials mode — agent still runs in fallback
             stub = (
-                "I cannot reach the LLM (missing credentials in .env).\n"
-                "Thought: I will log this as a normal cycle.\n"
-                "Action: log_normal_cycle\n"
-                'Action Input: {"temperature": 0, "vibration": 0, "pressure": 0, "tick": 0}\n'
-                "Observation: logged\n"
-                'Final Answer: {"status": "Normal", "action": "Continue", '
-                '"risk": "Low", "tool_used": "log_normal_cycle", '
-                '"diagnoses": ["LLM unavailable"], "summary": "Running without LLM credentials."}'
+                "I don't have LLM credentials. I'll use the available sensor data "
+                "and call log_normal_cycle as a safe default action."
             )
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content=stub))]
             )
 
-        # ── Live API call ──────────────────────────────────────────── #
         headers = {
             "Content-Type" : "application/json",
             "Authorization": f"Bearer {API_KEY}",
@@ -146,26 +141,88 @@ class CapgeminiNovaLite(BaseChatModel):
             text = self._extract_text(resp.json())
 
         except requests.exceptions.Timeout:
-            text = (
-                "Thought: The LLM timed out. I will log this cycle as normal.\n"
-                "Action: log_normal_cycle\n"
-                'Action Input: {"temperature": 0, "vibration": 0, "pressure": 0, "tick": -1}\n'
-                "Observation: logged\n"
-                'Final Answer: {"status": "Normal", "action": "Continue", "risk": "Low", '
-                '"tool_used": "log_normal_cycle", "diagnoses": ["LLM timeout"], '
-                '"summary": "LLM timed out — defaulted to normal."}'
-            )
+            text = "API timeout — proceeding with safe default."
         except Exception as e:
-            text = (
-                f"Thought: API error: {e}. Logging as normal.\n"
-                "Action: log_normal_cycle\n"
-                'Action Input: {"temperature": 0, "vibration": 0, "pressure": 0, "tick": -1}\n'
-                "Observation: logged\n"
-                'Final Answer: {"status": "Normal", "action": "Continue", "risk": "Low", '
-                '"tool_used": "log_normal_cycle", "diagnoses": ["API error"], '
-                '"summary": "API error — defaulted to normal."}'
-            )
+            text = f"API error ({e}) — proceeding with safe default."
 
         return ChatResult(
             generations=[ChatGeneration(message=AIMessage(content=text))]
         )
+
+    # ── bind_tools support (required by create_agent in LangChain 1.0) ── #
+
+    def bind_tools(self, tools, **kwargs):
+        """
+        LangChain 1.0's create_agent() calls bind_tools() on the model.
+        We return a simple wrapper that appends tool schemas to every
+        system message so the LLM knows what tools are available.
+        """
+        return _ToolBoundModel(base_model=self, tools=tools)
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  Tool-bound wrapper — returned by bind_tools()
+# ─────────────────────────────────────────────────────────────────────────── #
+
+class _ToolBoundModel(BaseChatModel):
+    """
+    Thin wrapper around CapgeminiNovaLite that injects tool descriptions
+    into the system prompt so the model can reason about tool selection.
+
+    This satisfies the interface expected by create_agent() in LangChain 1.0
+    without requiring a native tool-calling API on the Capgemini endpoint.
+    """
+
+    base_model: Any
+    tools: Any
+
+    @property
+    def _llm_type(self) -> str:
+        return "capgemini-nova-lite-tool-bound"
+
+    @property
+    def _identifying_params(self) -> dict:
+        return self.base_model._identifying_params
+
+    def _build_tool_description(self) -> str:
+        lines = ["You have access to these tools — call them by name:\n"]
+        for t in self.tools:
+            name = getattr(t, "name", str(t))
+            desc = getattr(t, "description", "No description available.")
+            lines.append(f"  Tool: {name}\n  Description: {desc}\n")
+        lines.append(
+            "\nTo use a tool respond with:\n"
+            "Action: <tool_name>\n"
+            "Action Input: <json_string>\n"
+            "When done, respond with:\n"
+            "Final Answer: <your summary json>"
+        )
+        return "\n".join(lines)
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        """Inject tool descriptions into the system message, then call base model."""
+        tool_desc    = self._build_tool_description()
+        augmented    = []
+        has_system   = False
+
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                augmented.append(SystemMessage(
+                    content=f"{msg.content}\n\n{tool_desc}"
+                ))
+                has_system = True
+            else:
+                augmented.append(msg)
+
+        if not has_system:
+            augmented.insert(0, SystemMessage(content=tool_desc))
+
+        return self.base_model._generate(augmented, stop=stop, **kwargs)
+
+    def bind_tools(self, tools, **kwargs):
+        return _ToolBoundModel(base_model=self.base_model, tools=tools)
