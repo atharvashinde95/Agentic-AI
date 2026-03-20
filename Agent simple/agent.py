@@ -1,28 +1,28 @@
 """
 agent.py
 --------
-Autonomous Predictive Maintenance Agent — LangChain ReAct (modern, warning-free).
+Autonomous Predictive Maintenance Agent — LangChain 0.3.x, zero warnings.
 
-Memory approach (LangChain v0.3+)
-──────────────────────────────────
-ConversationBufferWindowMemory was deprecated in v0.3.1 and will be removed
-in v1.0.  The modern idiomatic approach for a ReAct agent is:
+Import map (all verified stable on langchain 0.3.x)
+----------------------------------------------------
+  from langchain.agents       import AgentExecutor, create_react_agent
+  from langchain_core.prompts import PromptTemplate
+  (langchain_core.tools @tool is used in tools.py)
 
-  • Keep a plain Python deque of (human, ai) string pairs ourselves.
-  • Format them as a "chat_history" string on every invoke() call.
-  • Pass that string via the prompt variable {chat_history}.
+Memory
+------
+  No LangChain memory class is used.
+  We maintain a plain Python deque of (human_str, ai_str) pairs and format
+  them as a {chat_history} string injected into the prompt on every call.
+  This is the recommended pattern after ConversationBufferWindowMemory was
+  deprecated in LangChain 0.3.1.
 
-This gives identical behaviour with zero deprecation warnings and zero
-extra dependencies.
-
-Architecture
-────────────
-  MaintenanceAgent
-    ├── CapgeminiNovaLite   (custom BaseChatModel — llm_client.py)
-    ├── 6 @tool functions   (tools.py)
-    ├── ReAct PromptTemplate
-    ├── AgentExecutor       (create_react_agent, max 8 iterations)
-    └── Manual chat history window (last K=6 exchanges, plain deque)
+ReAct loop
+----------
+  create_react_agent builds a Runnable that follows the classic
+  Thought / Action / Action Input / Observation / Final Answer format.
+  AgentExecutor drives the loop, captures intermediate_steps, and handles
+  malformed LLM output gracefully (handle_parsing_errors=True).
 """
 
 import json
@@ -40,84 +40,103 @@ from tools import (
     get_trend_analysis,
 )
 
-# ── Modern LangChain imports (no deprecated classes) ──────────────────────── #
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain_core.prompts import PromptTemplate
+# ── Stable langchain 0.3.x imports ───────────────────────────────────────── #
+from langchain.agents       import AgentExecutor, create_react_agent   # 0.3.x
+from langchain_core.prompts import PromptTemplate                       # core
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-#  History window size
+#  Configuration
 # ─────────────────────────────────────────────────────────────────────────── #
 
-HISTORY_WINDOW = 6   # Keep last N (human, ai) exchange pairs
-
-
-# ─────────────────────────────────────────────────────────────────────────── #
-#  ReAct prompt — includes {chat_history} for the manual memory window
-# ─────────────────────────────────────────────────────────────────────────── #
-
-REACT_PROMPT_TEMPLATE = """You are an Autonomous Predictive Maintenance Agent.
-Your job: analyse live industrial sensor data, detect faults, and take the
-correct maintenance action using your available tools.
-
-Previous conversation context (most recent {window} cycles):
-{chat_history}
-
-TOOLS AVAILABLE:
-{tools}
-
-TOOL NAMES: {tool_names}
-
-STRICT WORKFLOW — follow this exact sequence every single cycle:
-  Step 1. Call check_sensor_status with the raw sensor JSON to get severity levels.
-  Step 2. Call diagnose_condition with the output of step 1 to identify faults and get recommended_action.
-  Step 3. Based on recommended_action:
-          - "Maintenance" → call schedule_maintenance
-          - "Alert"       → call send_alert
-          - "Continue"    → call log_normal_cycle
-  Step 4. (Optional) Call get_trend_analysis for richer context on borderline cases.
-  Step 5. Output a Final Answer summarising the cycle outcome.
-
-MANDATORY FORMAT — you MUST follow this exactly:
-Thought: <your reasoning about the current sensor state>
-Action: <one tool name exactly as listed in TOOL NAMES>
-Action Input: <valid JSON string as the tool argument>
-Observation: <tool result — filled in automatically, do not write this>
-... (repeat Thought/Action/Action Input/Observation as needed)
-Thought: I now have enough information to give the final answer.
-Final Answer: {{"status": "<Normal|Warning|Failure>", "action": "<Continue|Alert|Maintenance>", "risk": "<Low|Medium|High>", "tool_used": "<action tool name>", "diagnoses": ["<fault 1>", "..."], "summary": "<one sentence>"}}
-
-RULES:
-- Always use double-quoted keys in JSON Action Inputs.
-- Never skip steps 1 and 2.
-- Always end with a Final Answer line in the JSON format shown above.
-- For "Continue" the risk must always be "Low".
-- Be concise in Thought steps — one or two sentences maximum.
-
-{agent_scratchpad}"""
+HISTORY_WINDOW = 6   # Number of (human, ai) pairs to keep in context
+MAX_ITERATIONS = 8   # Hard cap on ReAct loop iterations per cycle
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-#  Agent
+#  ReAct Prompt Template
+#
+#  LangChain PromptTemplate uses single braces for variables.
+#  Literal braces that should appear in the output are doubled: {{ }}
+#
+#  Required template variables:
+#    {tools}            – tool descriptions (injected by create_react_agent)
+#    {tool_names}       – comma list of tool names (injected)
+#    {chat_history}     – our manual history string
+#    {window}           – history window size (for the header)
+#    {input}            – the current human message
+#    {agent_scratchpad} – running Thought/Action trace (injected by executor)
+# ─────────────────────────────────────────────────────────────────────────── #
+
+_PROMPT_TEXT = (
+    "You are an Autonomous Predictive Maintenance Agent for industrial equipment.\n"
+    "Analyse sensor data, detect faults, and take the correct action using tools.\n\n"
+    "Recent cycle history (last {window} cycles):\n"
+    "{chat_history}\n\n"
+    "Available tools:\n"
+    "{tools}\n\n"
+    "Tool names: {tool_names}\n\n"
+    "Mandatory workflow per cycle\n"
+    "----------------------------\n"
+    "1. Call check_sensor_status  with the raw sensor JSON.\n"
+    "2. Call diagnose_condition   with the output of step 1.\n"
+    "3. Based on recommended_action in the diagnosis:\n"
+    '   - "Maintenance" -> call schedule_maintenance\n'
+    '   - "Alert"       -> call send_alert\n'
+    '   - "Continue"    -> call log_normal_cycle\n'
+    "4. Optionally call get_trend_analysis for borderline cases.\n"
+    "5. Produce a Final Answer.\n\n"
+    "You MUST use this exact format for every step:\n\n"
+    "Thought: <one or two sentences of reasoning>\n"
+    "Action: <exact tool name from tool names list>\n"
+    "Action Input: <valid JSON string>\n"
+    "Observation: <tool result — do NOT write this yourself>\n"
+    "... (repeat Thought/Action/Action Input/Observation until done)\n"
+    "Thought: I now have all the information I need.\n"
+    'Final Answer: {{"status": "<Normal|Warning|Failure>", '
+    '"action": "<Continue|Alert|Maintenance>", '
+    '"risk": "<Low|Medium|High>", '
+    '"tool_used": "<last action tool name>", '
+    '"diagnoses": ["<fault>"], '
+    '"summary": "<one sentence>"}}\n\n'
+    "Rules\n"
+    "-----\n"
+    "- Always quote JSON keys with double quotes.\n"
+    "- Never skip steps 1 and 2.\n"
+    "- Always end with a Final Answer on its own line.\n"
+    '- "Continue" means risk must be "Low".\n'
+    "- Keep Thought steps to one or two sentences.\n\n"
+    "Input: {input}\n\n"
+    "{agent_scratchpad}"
+)
+
+REACT_PROMPT = PromptTemplate.from_template(_PROMPT_TEXT)
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  Agent class
 # ─────────────────────────────────────────────────────────────────────────── #
 
 class MaintenanceAgent:
     """
     Single LangChain ReAct agent for autonomous predictive maintenance.
 
-    Memory is managed as a plain rolling deque of string pairs —
-    no deprecated LangChain memory classes used.
+    Uses langchain 0.3.x stable APIs only:
+      - create_react_agent (langchain.agents)
+      - AgentExecutor      (langchain.agents)
+      - PromptTemplate     (langchain_core.prompts)
+      - BaseChatModel      (langchain_core — via llm_client.py)
+      - @tool              (langchain_core — via tools.py)
 
-    Public API:
-        result = agent.run_cycle(reading: dict)  → structured result dict
-        agent.reset()                             → clear state
+    Memory is a plain Python deque — no deprecated LangChain memory class.
     """
 
     def __init__(self):
+
         # ── LLM ─────────────────────────────────────────────────── #
         self.llm = CapgeminiNovaLite(max_tokens=512, temperature=0.1)
 
-        # ── Tools ────────────────────────────────────────────────── #
+        # ── Tools (all decorated with @tool from langchain_core) ─── #
         self.tools = [
             check_sensor_status,
             diagnose_condition,
@@ -127,51 +146,48 @@ class MaintenanceAgent:
             get_trend_analysis,
         ]
 
-        # ── Prompt ───────────────────────────────────────────────── #
-        self.prompt = PromptTemplate.from_template(REACT_PROMPT_TEMPLATE)
-
-        # ── Manual rolling chat history (replaces deprecated memory) #
-        # Each entry is a tuple: (human_msg: str, ai_msg: str)
-        self._chat_history: deque = deque(maxlen=HISTORY_WINDOW)
-
-        # ── AgentExecutor ────────────────────────────────────────── #
+        # ── ReAct agent runnable ─────────────────────────────────── #
         react_agent = create_react_agent(
             llm=self.llm,
             tools=self.tools,
-            prompt=self.prompt,
+            prompt=REACT_PROMPT,
         )
+
+        # ── Executor ─────────────────────────────────────────────── #
         self.executor = AgentExecutor(
             agent=react_agent,
             tools=self.tools,
-            verbose=True,               # prints full ReAct chain to console
-            handle_parsing_errors=True, # gracefully recover from bad LLM output
-            max_iterations=8,
+            verbose=True,               # Full ReAct chain printed to console
+            handle_parsing_errors=True, # Recover from malformed LLM output
+            max_iterations=MAX_ITERATIONS,
             return_intermediate_steps=True,
         )
+
+        # ── Manual rolling chat history (plain deque) ─────────────── #
+        # Each entry: (human_msg_str, ai_final_answer_str)
+        self._chat_history: deque = deque(maxlen=HISTORY_WINDOW)
 
         # ── Counters ─────────────────────────────────────────────── #
         self.cycle_count = 0
 
-    # ── Build chat history string ──────────────────────────────────── #
+    # ── History helpers ────────────────────────────────────────────── #
 
     def _format_chat_history(self) -> str:
-        """
-        Render the rolling window of past cycles as a plain string.
-        Example:
-            Human: Analyse tick #4 — T=70°C …
-            AI: {"status": "Normal", "action": "Continue", …}
-        """
+        """Render the deque as a readable string for the prompt."""
         if not self._chat_history:
-            return "(no previous cycles yet)"
+            return "(no previous cycles recorded yet)"
         lines = []
         for human, ai in self._chat_history:
             lines.append(f"Human: {human}")
-            lines.append(f"AI: {ai}")
+            lines.append(f"Agent: {ai}")
         return "\n".join(lines)
 
-    def _update_history(self, human_msg: str, ai_response: str):
-        """Append one (human, ai) pair to the rolling window."""
-        self._chat_history.append((human_msg, ai_response))
+    def _save_to_history(self, human_msg: str, ai_answer: str):
+        """Append one exchange to the rolling window."""
+        self._chat_history.append((
+            human_msg[:150],    # keep short to save tokens
+            ai_answer[:200],
+        ))
 
     # ── Main public method ─────────────────────────────────────────── #
 
@@ -180,42 +196,40 @@ class MaintenanceAgent:
         Execute one full autonomous agent cycle.
 
         Args:
-            reading : dict from SensorSimulator.read()
+            reading : dict produced by SensorSimulator.read()
 
         Returns:
-            Structured result dict consumed by streamlit_app.py.
+            Structured result dict ready for streamlit_app.py.
         """
         self.cycle_count += 1
-
-        # Push reading into shared memory store (tools read from here)
         mem.add_reading(reading)
 
-        # Build the human message for this cycle
+        # Human message for this cycle
         sensor_payload = json.dumps({
-            "tick"       : reading["tick"],
-            "temperature": reading["temperature"],
-            "vibration"  : reading["vibration"],
-            "pressure"   : reading["pressure"],
+            "tick"        : reading["tick"],
+            "temperature" : reading["temperature"],
+            "vibration"   : reading["vibration"],
+            "pressure"    : reading["pressure"],
         })
         human_message = (
-            f"Analyse sensor reading at tick #{reading['tick']} and take action.\n"
+            f"Analyse sensor reading at tick #{reading['tick']}. "
             f"Sensor data: {sensor_payload}"
         )
 
         try:
             raw = self.executor.invoke({
-                "input"       : human_message,
-                "chat_history": self._format_chat_history(),
-                "window"      : HISTORY_WINDOW,
+                "input"        : human_message,
+                "chat_history" : self._format_chat_history(),
+                "window"       : HISTORY_WINDOW,
             })
-        except Exception as e:
-            return self._fallback_result(reading, str(e))
+        except Exception as exc:
+            return self._fallback_result(reading, str(exc))
 
         final_answer = raw.get("output", "")
         intermediate = raw.get("intermediate_steps", [])
 
-        # Update our manual history window with this exchange
-        self._update_history(human_message[:120], final_answer[:200])
+        # Save to history window
+        self._save_to_history(human_message, final_answer)
 
         result = self._parse_output(
             final_answer=final_answer,
@@ -233,11 +247,9 @@ class MaintenanceAgent:
         intermediate_steps: list,
         reading: dict,
     ) -> dict:
-        """
-        Parse the agent's Final Answer JSON and the intermediate steps
-        into a clean result dict for the UI.
-        """
-        # Try to parse Final Answer as JSON
+        """Parse Final Answer JSON + intermediate steps into a UI-ready dict."""
+
+        # Attempt to parse the Final Answer as JSON
         parsed = {}
         json_match = re.search(r'\{[^{}]*\}', final_answer, re.DOTALL)
         if json_match:
@@ -252,12 +264,12 @@ class MaintenanceAgent:
         diagnoses = parsed.get("diagnoses", [])
         summary   = parsed.get("summary",   final_answer[:200])
 
-        # Derive status from action (authoritative)
+        # Status is derived from action (single source of truth)
         status = {"Maintenance": "Failure", "Alert": "Warning"}.get(action, "Normal")
 
         # Unpack intermediate steps
-        tool_calls    = []
-        tool_results  = {}
+        tool_calls   = []
+        tool_results = {}
         for step in intermediate_steps:
             if len(step) == 2:
                 agent_action, observation = step
@@ -270,7 +282,7 @@ class MaintenanceAgent:
                 })
                 tool_results[t_name] = observation
 
-        # Enrich from tool outputs when LLM's final answer was sparse
+        # Enrich from intermediate steps when Final Answer was sparse
         sensor_status = self._extract_sensor_status(tool_results)
         if not diagnoses:
             diagnoses = self._extract_diagnoses(tool_results)
@@ -280,20 +292,20 @@ class MaintenanceAgent:
         confidence = "High" if json_match else "Medium"
 
         return {
-            "tick"          : reading["tick"],
-            "reading"       : reading,
-            "sensor_status" : sensor_status,
-            "status"        : status,
-            "action"        : action,
-            "risk"          : risk,
-            "tool_used"     : tool_used,
-            "tool_calls"    : tool_calls,
-            "diagnoses"     : diagnoses if isinstance(diagnoses, list) else [str(diagnoses)],
-            "summary"       : summary,
-            "final_answer"  : final_answer,
-            "confidence"    : confidence,
-            "trend_summary" : mem.compute_trends(),
-            "cycle_count"   : self.cycle_count,
+            "tick"         : reading["tick"],
+            "reading"      : reading,
+            "sensor_status": sensor_status,
+            "status"       : status,
+            "action"       : action,
+            "risk"         : risk,
+            "tool_used"    : tool_used,
+            "tool_calls"   : tool_calls,
+            "diagnoses"    : diagnoses if isinstance(diagnoses, list) else [str(diagnoses)],
+            "summary"      : summary,
+            "final_answer" : final_answer,
+            "confidence"   : confidence,
+            "trend_summary": mem.compute_trends(),
+            "cycle_count"  : self.cycle_count,
         }
 
     # ── Extraction helpers ─────────────────────────────────────────── #
@@ -327,26 +339,26 @@ class MaintenanceAgent:
 
     def _fallback_result(self, reading: dict, error_msg: str) -> dict:
         return {
-            "tick"          : reading["tick"],
-            "reading"       : reading,
-            "sensor_status" : {},
-            "status"        : "Normal",
-            "action"        : "Continue",
-            "risk"          : "Low",
-            "tool_used"     : "log_normal_cycle",
-            "tool_calls"    : [],
-            "diagnoses"     : [f"Agent error: {error_msg}"],
-            "summary"       : "Fallback to normal — agent encountered an error.",
-            "final_answer"  : error_msg,
-            "confidence"    : "Low",
-            "trend_summary" : mem.compute_trends(),
-            "cycle_count"   : self.cycle_count,
+            "tick"         : reading["tick"],
+            "reading"      : reading,
+            "sensor_status": {},
+            "status"       : "Normal",
+            "action"       : "Continue",
+            "risk"         : "Low",
+            "tool_used"    : "log_normal_cycle",
+            "tool_calls"   : [],
+            "diagnoses"    : [f"Agent error: {error_msg}"],
+            "summary"      : "Agent encountered an error — defaulted to normal.",
+            "final_answer" : error_msg,
+            "confidence"   : "Low",
+            "trend_summary": mem.compute_trends(),
+            "cycle_count"  : self.cycle_count,
         }
 
     # ── Reset ──────────────────────────────────────────────────────── #
 
     def reset(self):
-        """Clear all state — call when restarting the simulation."""
+        """Clear all state when restarting the simulation."""
         self._chat_history.clear()
         self.cycle_count = 0
         mem.reset_store()
