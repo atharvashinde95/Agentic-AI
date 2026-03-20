@@ -1,313 +1,230 @@
 """
 agent.py
 --------
-The single Autonomous Predictive Maintenance Agent.
+The Autonomous Predictive Maintenance Agent — built entirely on LangChain.
 
-Architecture:
-  Main Agent
-    ├── Monitoring Module  (perception — detect anomalies)
-    ├── Diagnosis Module   (rule-based reasoning — classify condition)
-    ├── Decision Module    (choose action: Continue / Alert / Maintenance)
-    ├── Memory             (store last N readings, detect trends)
-    └── Tools              (alert_tool, maintenance_tool, logging_tool)
+Architecture
+────────────
+  MaintenanceAgent
+    ├── LLM              : CapgeminiNovaLite (custom BaseChatModel)
+    ├── Tools            : 6 @tool functions from tools.py
+    ├── ReAct Prompt     : System prompt that shapes agent reasoning
+    ├── AgentExecutor    : LangChain's Thought→Action→Observation loop
+    └── ConversationBufferWindowMemory : Keeps last K exchanges in context
 
-⚡ LLM is called ONLY when signals are ambiguous / mixed.
+How it works per cycle
+──────────────────────
+  1. Sensor reading is serialised to JSON and handed to the agent.
+  2. The AgentExecutor runs the ReAct loop:
+       Thought   → LLM reasons about what to do
+       Action    → LLM picks a tool from the 6 available
+       Action Input → LLM produces the JSON argument for that tool
+       Observation → Tool executes and returns its result
+       ... (loop until the LLM outputs "Final Answer:")
+  3. The final answer and all intermediate steps are parsed and
+     returned as a structured result dict for the Streamlit UI.
 """
 
+import json
+import re
 from collections import deque
-from tools import alert_tool, maintenance_tool, logging_tool
-from llm_client import call_llm, build_diagnosis_prompt
+
+import memory_store as mem
+from llm_client import CapgeminiNovaLite
+from tools import (
+    check_sensor_status,
+    diagnose_condition,
+    send_alert,
+    schedule_maintenance,
+    log_normal_cycle,
+    get_trend_analysis,
+)
+
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
+from langchain.memory import ConversationBufferWindowMemory
 
 
-# ──────────────────────────────────────────────────────────────────────────── #
-#  Thresholds
-# ──────────────────────────────────────────────────────────────────────────── #
+# ─────────────────────────────────────────────────────────────────────────── #
+#  ReAct system prompt
+# ─────────────────────────────────────────────────────────────────────────── #
 
-THRESHOLDS = {
-    "temperature": {
-        "warning":  85.0,   # °C
-        "critical": 100.0,
-    },
-    "vibration": {
-        "warning":  6.0,    # mm/s
-        "critical": 9.0,
-    },
-    "pressure": {
-        "warning":  7.0,    # bar
-        "critical": 9.5,
-    },
-}
+SYSTEM_PROMPT = """You are an Autonomous Predictive Maintenance Agent.
+Your job: analyse live industrial sensor data, detect faults, and take the
+correct maintenance action using your available tools.
 
-MEMORY_SIZE = 10   # Keep last N readings in memory
+TOOLS AVAILABLE:
+{tools}
 
+TOOL NAMES: {tool_names}
 
-# ──────────────────────────────────────────────────────────────────────────── #
-#  Memory Module
-# ──────────────────────────────────────────────────────────────────────────── #
+STRICT WORKFLOW — follow this every single cycle:
+  Step 1. Call check_sensor_status with the raw sensor JSON to get severity levels.
+  Step 2. Call diagnose_condition with the output of step 1 to get fault names and recommended_action.
+  Step 3. Based on recommended_action:
+          - "Maintenance" → call schedule_maintenance
+          - "Alert"       → call send_alert
+          - "Continue"    → call log_normal_cycle
+  Step 4. Optionally call get_trend_analysis if you want richer context.
+  Step 5. Output a Final Answer summarising: status, action taken, risk level, key findings.
 
-class AgentMemory:
-    """Stores the last MEMORY_SIZE sensor readings and computes trends."""
+FORMAT — you MUST use this exact format:
+Thought: <your reasoning>
+Action: <tool name exactly as listed>
+Action Input: <valid JSON string>
+Observation: <tool result — filled in automatically>
+... (repeat Thought/Action/Observation as needed)
+Thought: I now have enough information to give the final answer.
+Final Answer: <JSON with keys: status, action, risk, tool_used, diagnoses, summary>
 
-    def __init__(self, size: int = MEMORY_SIZE):
-        self.history = deque(maxlen=size)
+RULES:
+- Always use valid JSON strings as Action Inputs.
+- Never skip check_sensor_status or diagnose_condition.
+- Always end with a Final Answer in JSON format.
+- Be concise in Thought steps.
+- For "Continue" action the Final Answer risk must be "Low".
 
-    def add(self, reading: dict):
-        self.history.append(reading)
-
-    def get_all(self) -> list:
-        return list(self.history)
-
-    def trend_summary(self) -> dict:
-        """
-        Return the average and direction (rising / stable / falling)
-        for each sensor over the stored history.
-        """
-        if len(self.history) < 2:
-            return {}
-
-        data = list(self.history)
-        keys = ["temperature", "vibration", "pressure"]
-        summary = {}
-
-        for key in keys:
-            values = [r[key] for r in data]
-            avg = round(sum(values) / len(values), 2)
-            trend = "stable"
-            if values[-1] > values[0] * 1.05:
-                trend = "rising"
-            elif values[-1] < values[0] * 0.95:
-                trend = "falling"
-            summary[key] = {"average": avg, "trend": trend}
-
-        return summary
+{agent_scratchpad}
+"""
 
 
-# ──────────────────────────────────────────────────────────────────────────── #
-#  Main Agent
-# ──────────────────────────────────────────────────────────────────────────── #
+# ─────────────────────────────────────────────────────────────────────────── #
+#  Agent class
+# ─────────────────────────────────────────────────────────────────────────── #
 
 class MaintenanceAgent:
     """
-    Single autonomous agent that monitors, diagnoses, decides, and acts.
+    Single LangChain-powered autonomous agent.
+
+    Public API:
+      agent.run_cycle(reading: dict) → result dict
+      agent.reset()
     """
 
     def __init__(self):
-        self.memory = AgentMemory()
-        self.llm_call_count = 0   # Track how many times we call LLM (should be rare)
+        # ── LLM ─────────────────────────────────────────────────── #
+        self.llm = CapgeminiNovaLite(max_tokens=512, temperature=0.1)
 
-    # ── 1. Monitoring Module ─────────────────────────────────────────────── #
+        # ── Tools ────────────────────────────────────────────────── #
+        self.tools = [
+            check_sensor_status,
+            diagnose_condition,
+            send_alert,
+            schedule_maintenance,
+            log_normal_cycle,
+            get_trend_analysis,
+        ]
 
-    def monitor(self, reading: dict) -> dict:
-        """
-        Check each sensor against thresholds.
-        Returns a dict with severity level for each sensor.
-        """
-        sensor_status = {}
+        # ── Prompt ───────────────────────────────────────────────── #
+        self.prompt = PromptTemplate.from_template(SYSTEM_PROMPT)
 
-        for sensor in ["temperature", "vibration", "pressure"]:
-            value = reading[sensor]
-            warn  = THRESHOLDS[sensor]["warning"]
-            crit  = THRESHOLDS[sensor]["critical"]
-
-            if value >= crit:
-                sensor_status[sensor] = "critical"
-            elif value >= warn:
-                sensor_status[sensor] = "warning"
-            else:
-                sensor_status[sensor] = "normal"
-
-        return sensor_status
-
-    # ── 2. Diagnosis Module ──────────────────────────────────────────────── #
-
-    def diagnose(self, reading: dict, sensor_status: dict) -> list:
-        """
-        Rule-based diagnosis: map sensor conditions to fault names.
-        Returns a list of anomaly strings.
-        """
-        anomalies = []
-        diagnoses = []
-
-        # Temperature rules
-        if sensor_status["temperature"] == "critical":
-            anomalies.append("temperature_critical")
-            diagnoses.append("Severe Overheating")
-        elif sensor_status["temperature"] == "warning":
-            anomalies.append("temperature_warning")
-            diagnoses.append("Overheating")
-
-        # Vibration rules
-        if sensor_status["vibration"] == "critical":
-            anomalies.append("vibration_critical")
-            diagnoses.append("Severe Imbalance / Bearing Failure")
-        elif sensor_status["vibration"] == "warning":
-            anomalies.append("vibration_warning")
-            diagnoses.append("Mechanical Imbalance")
-
-        # Pressure rules
-        if sensor_status["pressure"] == "critical":
-            anomalies.append("pressure_critical")
-            diagnoses.append("Severe Pressure Spike")
-        elif sensor_status["pressure"] == "warning":
-            anomalies.append("pressure_warning")
-            diagnoses.append("High Pressure")
-
-        # Trend-based secondary diagnosis
-        trends = self.memory.trend_summary()
-        if trends:
-            for sensor_key in ["temperature", "vibration", "pressure"]:
-                if (
-                    trends.get(sensor_key, {}).get("trend") == "rising"
-                    and sensor_status[sensor_key] == "normal"
-                ):
-                    diagnoses.append(f"Rising {sensor_key} trend (watch)")
-
-        return anomalies, diagnoses
-
-    # ── 3. Decision Module ───────────────────────────────────────────────── #
-
-    def decide(self, sensor_status: dict, anomalies: list) -> tuple:
-        """
-        Rule-based decision engine.
-        Returns (action, risk_level, primary_sensor, use_llm_flag).
-
-        Actions: "Continue" | "Alert" | "Maintenance"
-        Risk:    "Low" | "Medium" | "High"
-        """
-        critical_sensors = [s for s, v in sensor_status.items() if v == "critical"]
-        warning_sensors  = [s for s, v in sensor_status.items() if v == "warning"]
-
-        # Clear critical → immediate Maintenance
-        if len(critical_sensors) >= 1:
-            return (
-                "Maintenance",
-                "High",
-                critical_sensors[0],
-                False,
-            )
-
-        # Multiple warnings → escalate to Maintenance
-        if len(warning_sensors) >= 2:
-            return (
-                "Maintenance",
-                "High",
-                warning_sensors[0],
-                False,
-            )
-
-        # Single warning → Alert, but also check if LLM needed
-        if len(warning_sensors) == 1:
-            # LLM edge case: warning sensor + rising trend on another sensor
-            trends = self.memory.trend_summary()
-            rising_sensors = [
-                k for k, v in trends.items()
-                if v.get("trend") == "rising" and k not in warning_sensors
-            ]
-            use_llm = len(rising_sensors) > 0  # Mixed signal → ask LLM
-            return (
-                "Alert",
-                "Medium",
-                warning_sensors[0],
-                use_llm,
-            )
-
-        # All normal
-        return ("Continue", "Low", None, False)
-
-    # ── 4. LLM Consultation ──────────────────────────────────────────────── #
-
-    def consult_llm(self, reading: dict, anomalies: list) -> str:
-        """
-        Called ONLY for ambiguous edge cases.
-        Returns an LLM-generated explanation string.
-        """
-        self.llm_call_count += 1
-        prompt = build_diagnosis_prompt(
-            readings=self.memory.get_all(),
-            anomalies=anomalies,
-            history_summary=self.memory.trend_summary(),
+        # ── Memory (keeps last 6 human/AI exchanges) ─────────────── #
+        self.memory = ConversationBufferWindowMemory(
+            memory_key="chat_history",
+            k=6,
+            return_messages=True,
         )
-        response = call_llm(prompt, max_tokens=200)
-        return response
 
-    # ── 5. Tool Dispatcher ───────────────────────────────────────────────── #
+        # ── Build ReAct agent + executor ─────────────────────────── #
+        react_agent = create_react_agent(
+            llm=self.llm,
+            tools=self.tools,
+            prompt=self.prompt,
+        )
+        self.executor = AgentExecutor(
+            agent=react_agent,
+            tools=self.tools,
+            memory=self.memory,
+            verbose=True,               # prints full ReAct chain to console
+            handle_parsing_errors=True, # gracefully handle malformed LLM output
+            max_iterations=8,           # prevent runaway loops
+            return_intermediate_steps=True,
+        )
 
-    def dispatch_tool(
-        self,
-        action: str,
-        risk: str,
-        primary_sensor: str,
-        reading: dict,
-        diagnoses: list,
-    ) -> dict:
-        """
-        Calls the appropriate tool based on the agent's decision.
-        """
-        if action == "Alert":
-            sensor_value = reading.get(primary_sensor, 0)
-            threshold    = THRESHOLDS[primary_sensor]["warning"]
-            return alert_tool(
-                sensor=primary_sensor,
-                value=sensor_value,
-                threshold=threshold,
-                risk=risk,
-            )
+        # ── Internal counters ────────────────────────────────────── #
+        self.cycle_count = 0
 
-        elif action == "Maintenance":
-            reason = "; ".join(diagnoses) if diagnoses else "Critical sensor reading"
-            urgency = "Immediate" if risk == "High" else "Scheduled"
-            return maintenance_tool(
-                reason=reason,
-                urgency=urgency,
-                sensor=primary_sensor,
-            )
-
-        else:
-            # Continue — just log
-            return logging_tool(
-                event="NORMAL",
-                details=(
-                    f"T={reading['temperature']}°C  "
-                    f"V={reading['vibration']}mm/s  "
-                    f"P={reading['pressure']}bar | Status: Normal"
-                ),
-            )
-
-    # ── Master Run Loop ──────────────────────────────────────────────────── #
+    # ── Public: run one full agent cycle ──────────────────────────── #
 
     def run_cycle(self, reading: dict) -> dict:
         """
-        Execute one full agent cycle for a single sensor reading.
+        Execute one autonomous agent cycle.
 
-        Returns a result dict containing everything the UI needs to display.
+        Args:
+            reading: dict from SensorSimulator.read()
+
+        Returns:
+            Structured result dict ready for Streamlit UI.
         """
-        # Step 1 — Store reading in memory
-        self.memory.add(reading)
+        self.cycle_count += 1
 
-        # Step 2 — Monitor (perception)
-        sensor_status = self.monitor(reading)
+        # Push reading into shared memory store for tools to access
+        mem.add_reading(reading)
 
-        # Step 3 — Diagnose (rule-based reasoning)
-        anomalies, diagnoses = self.diagnose(reading, sensor_status)
+        # Serialise reading for the agent's input
+        sensor_input = json.dumps({
+            "tick"       : reading["tick"],
+            "temperature": reading["temperature"],
+            "vibration"  : reading["vibration"],
+            "pressure"   : reading["pressure"],
+        })
 
-        # Step 4 — Decide (logic-based)
-        action, risk, primary_sensor, use_llm = self.decide(sensor_status, anomalies)
-
-        # Step 5 — Optionally consult LLM (edge cases only)
-        llm_explanation = None
-        if use_llm:
-            llm_explanation = self.consult_llm(reading, anomalies)
-
-        # Step 6 — Dispatch tool
-        tool_result = self.dispatch_tool(
-            action=action,
-            risk=risk,
-            primary_sensor=primary_sensor or "system",
-            reading=reading,
-            diagnoses=diagnoses,
+        human_message = (
+            f"Analyse the following sensor reading and take appropriate action.\n"
+            f"Sensor data: {sensor_input}"
         )
 
-        # Determine overall status label for UI
+        try:
+            raw = self.executor.invoke({"input": human_message})
+        except Exception as e:
+            # If the executor fails entirely, return a safe fallback
+            return self._fallback_result(reading, str(e))
+
+        # ── Parse agent output ────────────────────────────────────── #
+        final_answer = raw.get("output", "")
+        intermediate = raw.get("intermediate_steps", [])
+
+        result = self._parse_final_answer(
+            final_answer=final_answer,
+            intermediate_steps=intermediate,
+            reading=reading,
+        )
+
+        # Write to shared store so Streamlit can read it
+        mem.LATEST_RESULT = result
+        return result
+
+    # ── Internal helpers ──────────────────────────────────────────── #
+
+    def _parse_final_answer(
+        self,
+        final_answer: str,
+        intermediate_steps: list,
+        reading: dict,
+    ) -> dict:
+        """
+        Parse the agent's Final Answer (which should be JSON) into a
+        structured result dict. Falls back to reasonable defaults if
+        the LLM did not produce valid JSON.
+        """
+        # Try to parse the final answer as JSON
+        parsed_answer = {}
+        json_match = re.search(r'\{.*\}', final_answer, re.DOTALL)
+        if json_match:
+            try:
+                parsed_answer = json.loads(json_match.group())
+            except json.JSONDecodeError:
+                parsed_answer = {}
+
+        # Extract fields with sensible defaults
+        status   = parsed_answer.get("status",    "Normal")
+        action   = parsed_answer.get("action",    "Continue")
+        risk     = parsed_answer.get("risk",      "Low")
+        tool_used = parsed_answer.get("tool_used", "log_normal_cycle")
+        diagnoses = parsed_answer.get("diagnoses", [])
+        summary   = parsed_answer.get("summary",   final_answer[:200])
+
+        # Map action → status label
         if action == "Maintenance":
             status = "Failure"
         elif action == "Alert":
@@ -315,40 +232,104 @@ class MaintenanceAgent:
         else:
             status = "Normal"
 
-        # Compute a simple confidence score
-        confidence = self._compute_confidence(sensor_status, anomalies)
+        # Collect tool calls from intermediate steps
+        tool_calls = []
+        tool_results = {}
+        for step in intermediate_steps:
+            if len(step) == 2:
+                agent_action, observation = step
+                tool_name = getattr(agent_action, "tool", "unknown")
+                tool_input = getattr(agent_action, "tool_input", "")
+                tool_calls.append({
+                    "tool"       : tool_name,
+                    "tool_input" : tool_input,
+                    "observation": observation,
+                })
+                tool_results[tool_name] = observation
+
+        # Try to pull richer info from intermediate steps
+        sensor_status = self._extract_sensor_status(tool_results)
+        if not diagnoses:
+            diagnoses = self._extract_diagnoses(tool_results)
+        if not tool_used or tool_used == "log_normal_cycle":
+            tool_used = self._extract_primary_tool(tool_calls)
+
+        # Confidence based on how certain the agent's answer looked
+        confidence = "High" if json_match else "Medium"
 
         return {
-            "tick"           : reading["tick"],
-            "reading"        : reading,
-            "sensor_status"  : sensor_status,
-            "anomalies"      : anomalies,
-            "diagnoses"      : diagnoses,
-            "action"         : action,
-            "status"         : status,
-            "risk"           : risk,
-            "primary_sensor" : primary_sensor,
-            "tool_result"    : tool_result,
-            "llm_used"       : use_llm,
-            "llm_explanation": llm_explanation,
-            "confidence"     : confidence,
-            "llm_call_count" : self.llm_call_count,
-            "trend_summary"  : self.memory.trend_summary(),
+            "tick"            : reading["tick"],
+            "reading"         : reading,
+            "sensor_status"   : sensor_status,
+            "status"          : status,
+            "action"          : action,
+            "risk"            : risk,
+            "tool_used"       : tool_used,
+            "tool_calls"      : tool_calls,
+            "diagnoses"       : diagnoses if isinstance(diagnoses, list) else [str(diagnoses)],
+            "summary"         : summary,
+            "final_answer"    : final_answer,
+            "confidence"      : confidence,
+            "trend_summary"   : mem.compute_trends(),
+            "cycle_count"     : self.cycle_count,
         }
 
-    def _compute_confidence(self, sensor_status: dict, anomalies: list) -> str:
-        """Simple heuristic for confidence in the decision."""
-        critical = sum(1 for v in sensor_status.values() if v == "critical")
-        warning  = sum(1 for v in sensor_status.values() if v == "warning")
-        if critical >= 1:
-            return "High"
-        if warning >= 2:
-            return "High"
-        if warning == 1:
-            return "Medium"
-        return "High"   # Normal state is confidently normal
+    def _extract_sensor_status(self, tool_results: dict) -> dict:
+        """Pull sensor_status dict out of check_sensor_status tool result."""
+        raw = tool_results.get("check_sensor_status", "")
+        if raw:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                return parsed.get("sensor_status", {})
+            except Exception:
+                pass
+        return {"temperature": "unknown", "vibration": "unknown", "pressure": "unknown"}
+
+    def _extract_diagnoses(self, tool_results: dict) -> list:
+        """Pull faults list out of diagnose_condition tool result."""
+        raw = tool_results.get("diagnose_condition", "")
+        if raw:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                return parsed.get("faults", [])
+            except Exception:
+                pass
+        return []
+
+    def _extract_primary_tool(self, tool_calls: list) -> str:
+        """
+        Identify the last action tool used
+        (the one that took the maintenance/alert/log action).
+        """
+        action_tools = {
+            "send_alert", "schedule_maintenance", "log_normal_cycle"
+        }
+        for step in reversed(tool_calls):
+            if step["tool"] in action_tools:
+                return step["tool"]
+        return "log_normal_cycle"
+
+    def _fallback_result(self, reading: dict, error_msg: str) -> dict:
+        """Return a safe result dict when the executor fails entirely."""
+        return {
+            "tick"          : reading["tick"],
+            "reading"       : reading,
+            "sensor_status" : {},
+            "status"        : "Normal",
+            "action"        : "Continue",
+            "risk"          : "Low",
+            "tool_used"     : "log_normal_cycle",
+            "tool_calls"    : [],
+            "diagnoses"     : [f"Agent error: {error_msg}"],
+            "summary"       : "Fallback to normal — agent encountered an error.",
+            "final_answer"  : error_msg,
+            "confidence"    : "Low",
+            "trend_summary" : mem.compute_trends(),
+            "cycle_count"   : self.cycle_count,
+        }
 
     def reset(self):
-        """Reset agent state (useful when restarting simulation)."""
-        self.memory = AgentMemory()
-        self.llm_call_count = 0
+        """Clear memory and counters — call when restarting simulation."""
+        self.memory.clear()
+        self.cycle_count = 0
+        mem.reset_store()

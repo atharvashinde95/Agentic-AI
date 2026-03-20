@@ -1,12 +1,14 @@
 """
 main.py
 -------
-Entry point for running the agent in CONSOLE mode (no UI).
+Console entry point — runs the LangChain Maintenance Agent without the UI.
 
 Usage:
     python main.py
 
 Press Ctrl+C to stop.
+Each cycle prints the full ReAct chain (via verbose=True in AgentExecutor)
+plus a clean summary line.
 """
 
 import time
@@ -15,45 +17,38 @@ from agent import MaintenanceAgent
 
 
 def run():
-    print("=" * 60)
-    print("  🤖 Autonomous Predictive Maintenance Agent")
-    print("  Mode: Console")
+    print("=" * 65)
+    print("  🤖 LangChain Autonomous Predictive Maintenance Agent")
+    print("  Mode  : Console (verbose ReAct chain)")
     print("  Press Ctrl+C to stop")
-    print("=" * 60)
+    print("=" * 65)
 
     simulator = SensorSimulator()
     agent     = MaintenanceAgent()
 
-    cycle = 0
     try:
         while True:
-            cycle += 1
             reading = simulator.read()
-            result  = agent.run_cycle(reading)
+            print(f"\n{'═'*65}")
+            print(f"  📡 Tick #{reading['tick']} — "
+                  f"T={reading['temperature']}°C  "
+                  f"V={reading['vibration']}mm/s  "
+                  f"P={reading['pressure']}bar")
+            print(f"{'═'*65}")
 
-            # ── Print cycle summary ──────────────────────────────── #
-            print(f"\n{'─'*55}")
-            print(f"  Tick #{result['tick']:>4}  |  Status: {result['status']:<8}  |  Risk: {result['risk']}")
-            print(f"{'─'*55}")
-            print(f"  Temp     : {reading['temperature']:>6.2f} °C   [{result['sensor_status']['temperature']}]")
-            print(f"  Vibration: {reading['vibration']:>6.2f} mm/s [{result['sensor_status']['vibration']}]")
-            print(f"  Pressure : {reading['pressure']:>6.2f} bar  [{result['sensor_status']['pressure']}]")
+            result = agent.run_cycle(reading)
 
+            print(f"\n  ✅ RESULT  |  Status: {result['status']}  |  "
+                  f"Action: {result['action']}  |  Risk: {result['risk']}")
+            print(f"  🔧 Tool   : {result['tool_used']}")
             if result["diagnoses"]:
-                print(f"  Diagnosis: {', '.join(result['diagnoses'])}")
+                print(f"  🩺 Faults : {', '.join(result['diagnoses'][:2])}")
+            print(f"  📋 Summary: {result['summary'][:120]}")
 
-            print(f"  Decision : {result['action']}")
-            print(f"  Tool Used: {result['tool_result']['tool']}")
-            print(f"  Confidence: {result['confidence']}")
-
-            if result["llm_used"] and result["llm_explanation"]:
-                print(f"\n  🤖 LLM Says: {result['llm_explanation']}")
-
-            time.sleep(2)  # 2-second cycle
+            time.sleep(2)
 
     except KeyboardInterrupt:
-        print(f"\n\n  Simulation stopped after {cycle} cycles.")
-        print(f"  LLM was called {agent.llm_call_count} time(s).")
+        print(f"\n\n  Simulation stopped after {agent.cycle_count} cycles.")
         print("  Goodbye! 👋")
 
 
