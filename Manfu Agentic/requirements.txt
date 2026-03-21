@@ -1,8 +1,0 @@
-langchain
-langchain-openai
-langchain-core
-openai
-streamlit
-plotly
-pandas
-python-dotenv
