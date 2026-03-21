@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────
+# Predictive Maintenance Agent — Requirements
+# Python >= 3.10 required
+#
+# PINNED VERSIONS — tested and compatible together.
+# Do NOT mix different major versions of langchain packages.
+# ─────────────────────────────────────────────────────────────
+
+# Core LangChain
+langchain==0.3.25
+langchain-core==0.3.58
+langchain-community==0.3.23
+
+# LangGraph — ReAct agent loop engine
+langgraph==0.4.1
+
+# LangChain OpenAI-compatible LLM wrapper
+# (used to connect to any OpenAI-format endpoint like Capgemini/Amazon Nova)
+langchain-openai==0.3.16
+
+# Streamlit UI
+streamlit>=1.35.0
+
+# HTTP client (used inside LangChain under the hood)
+requests>=2.31.0
+
+# Pydantic v2 — required by LangChain 0.3.x
+pydantic>=2.7.0,<3.0.0
